@@ -31,7 +31,7 @@ user_videos = {}
 
 # Initialize Pyrogram Client (User Account)
 app = Client(
-    settings.BOT_NAME,
+    name=settings.BOT_NAME,
     api_id=settings.API_ID,
     api_hash=settings.API_HASH,
     phone_number=settings.PHONE_NUMBER,
