@@ -1,0 +1,5 @@
+.env
+data
+output_audio
+temp_videos
+video_audio_merger_bot.session
