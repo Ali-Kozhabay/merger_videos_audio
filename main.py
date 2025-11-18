@@ -42,18 +42,6 @@ async def start_handler(event):
         buttons=reply_buttons
     )
 
-
-@client.on(events.NewMessage(pattern='/clear'))
-async def clear_handler(event):
-    """Clear user's video queue"""
-    user_id = event.sender_id
-    if user_id in user_videos:
-        del user_videos[user_id]
-        await event.respond("✅ Video queue cleared!")
-    else:
-        await event.respond("❌ No videos in queue")
-
-
 @client.on(events.NewMessage(pattern='/clear'))
 async def clear_handler(event):
     """Clear user's video queue (alias for /cancel)"""
@@ -131,11 +119,8 @@ async def done_handler(event):
             else:
                 await event.respond(f"⚠️ Video {idx + 1} has no audio track, skipping...")
                 video_clip.close()
-                os.remove(video_path)
                 continue
 
-            # Clean up video file
-            os.remove(video_path)
 
         if not audio_clips:
             await processing_msg.edit("❌ No audio found in any videos!")
