@@ -1,275 +1,386 @@
 import os
-import logging
+import asyncio
+import tempfile
+import shutil
 
 
-from pyrogram import Client, filters
-from pyrogram.types import Message
+from telethon import TelegramClient, events, Button
+from telethon.tl.types import DocumentAttributeVideo, DocumentAttributeAudio
 from moviepy.editor import VideoFileClip, concatenate_audioclips, AudioFileClip
-from pathlib import Path
 
 from config import settings
 
-# Configure logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
 
 
+# Initialize the client
+client = TelegramClient('bot_session', settings.API_ID, settings.API_HASH)
 
-# Directories
-TEMP_DIR = "temp_videos"
-OUTPUT_DIR = "output_audio"
-
-# Create necessary directories
-Path(TEMP_DIR).mkdir(exist_ok=True)
-Path(OUTPUT_DIR).mkdir(exist_ok=True)
-
-# Store user videos in memory
+# Store user video collections
 user_videos = {}
 
-# Initialize Pyrogram Client (User Account)
-app = Client(
-    name=settings.BOT_NAME,
-    api_id=settings.API_ID,
-    api_hash=settings.API_HASH,
-    phone_number=settings.PHONE_NUMBER,
-)
 
+@client.on(events.NewMessage(pattern='/start'))
+async def start_handler(event):
+    """Handle /start command"""
+    inline_buttons = [
+        [Button.inline("📊 Check Status", b"status")],
+        [Button.inline("✅ Process Videos", b"done"), Button.inline("❌ Clear Queue", b"cancel")]
+    ]
 
-@app.on_message(filters.command("start") & filters.private)
-async def start_command(client: Client, message: Message):
-    """Send welcome message."""
-    await message.reply_text(
-        "🎬 **Welcome to Video Audio Merger Bot!**\n\n"
-        "📹 Send me multiple video files (up to 2GB each!)\n"
-        "🎵 I'll extract and merge the audio\n"
-        "🔊 Then send you the combined audio file\n\n"
-        "**Commands:**\n"
-        "• `/start` - Start the bot\n"
-        "• `/merge` - Merge all sent videos' audio\n"
-        "• `/clear` - Clear all videos and start over\n"
-        "• `/status` - Check how many videos you've sent\n\n"
+    # Reply keyboard buttons (always visible at bottom)
+    reply_buttons = [
+        [Button.text("✅ Process Videos"), Button.text("📊 Status")],
+        [Button.text("/clear"), Button.text("/start")]
+    ]
+
+    await event.respond(
+        "👋 Welcome to Video Audio Concatenator Bot!\n\n"
+        "📹 Send me multiple videos (up to 2GB each)\n"
+        "🎵 I'll extract and combine their audio\n"
+        "🔊 Then send you the merged audio file\n\n"
+        "Use the buttons below to control the bot:",
+        buttons=reply_buttons
     )
 
 
-@app.on_message(filters.command("help") & filters.private)
-async def help_command(client: Client, message: Message):
-    """Send help message."""
-    await message.reply_text(
-        "**How to use:**\n\n"
-        "1️⃣ Send me video files one by one\n"
-        "2️⃣ Use `/status` to check your queue\n"
-        "3️⃣ Use `/merge` to combine all audio\n"
-        "4️⃣ Use `/clear` to delete all and start over\n\n"
-        "💡 **Tip:** You can send videos up to 2GB each!"
-    )
+@client.on(events.NewMessage(pattern='/clear'))
+async def clear_handler(event):
+    """Clear user's video queue"""
+    user_id = event.sender_id
+    if user_id in user_videos:
+        del user_videos[user_id]
+        await event.respond("✅ Video queue cleared!")
+    else:
+        await event.respond("❌ No videos in queue")
 
 
-@app.on_message(filters.command("status") & filters.private)
-async def status_command(client: Client, message: Message):
-    """Show status of user's videos."""
-    user_id = message.from_user.id
+@client.on(events.NewMessage(pattern='/clear'))
+async def clear_handler(event):
+    """Clear user's video queue (alias for /cancel)"""
+    user_id = event.sender_id
+    if user_id in user_videos:
+        del user_videos[user_id]
+        await event.respond("✅ Video queue cleared!")
+    else:
+        await event.respond("❌ No videos in queue")
+
+
+@client.on(events.NewMessage(pattern='/status'))
+async def status_handler(event):
+    """Show queue status"""
+    user_id = event.sender_id
+
+    reply_buttons = [
+        [Button.text("✅ Process Videos"), Button.text("📊 Status")],
+        [Button.text("/clear"), Button.text("/start")]
+    ]
+
+    if user_id in user_videos and user_videos[user_id]:
+        count = len(user_videos[user_id])
+        await event.respond(
+            f"📊 You have {count} video(s) in queue.\n"
+            f"Tap '✅ Process Videos' to process them.",
+            buttons=reply_buttons
+        )
+    else:
+        await event.respond("📭 No videos in queue", buttons=reply_buttons)
+
+
+@client.on(events.NewMessage(pattern='/done'))
+async def done_handler(event):
+    """Process all videos and create combined audio"""
+    user_id = event.sender_id
+
+    reply_buttons = [
+        [Button.text("✅ Process Videos"), Button.text("📊 Status")],
+        [Button.text("/clear"), Button.text("/start")]
+    ]
 
     if user_id not in user_videos or not user_videos[user_id]:
-        await message.reply_text("📭 No videos in queue. Send some videos first!")
+        await event.respond("❌ No videos to process. Please send videos first!", buttons=reply_buttons)
         return
 
-    count = len(user_videos[user_id])
-    video_list = "\n".join([f"  {i + 1}. {os.path.basename(v)}" for i, v in enumerate(user_videos[user_id])])
+    processing_msg = await event.respond("⏳ Processing your videos... This may take a while.")
 
-    await message.reply_text(
-        f"📊 **Status:**\n"
-        f"Videos in queue: **{count}**\n\n"
-        f"**Videos:**\n{video_list}\n\n"
-        f"Use `/merge` to combine them or `/clear` to start over."
-    )
+    temp_dir = tempfile.mkdtemp()
+    audio_clips = []
+
+    try:
+        # Download and extract audio from each video
+        for idx, video_message in enumerate(user_videos[user_id]):
+            status_msg = await processing_msg.edit(
+                f"📥 Downloading video {idx + 1}/{len(user_videos[user_id])}..."
+            )
+
+            video_path = os.path.join(temp_dir, f"video_{idx}.mp4")
+            audio_path = os.path.join(temp_dir, f"audio_{idx}.mp3")
+
+            # Download video using Telethon client
+            await client.download_media(video_message, video_path)
+
+            await status_msg.edit(
+                f"🎵 Extracting audio {idx + 1}/{len(user_videos[user_id])}..."
+            )
+
+            # Extract audio
+            video_clip = VideoFileClip(video_path)
+            if video_clip.audio is not None:
+                video_clip.audio.write_audiofile(audio_path, logger=None)
+                audio_clips.append(AudioFileClip(audio_path))
+                video_clip.close()
+            else:
+                await event.respond(f"⚠️ Video {idx + 1} has no audio track, skipping...")
+                video_clip.close()
+                os.remove(video_path)
+                continue
+
+            # Clean up video file
+            os.remove(video_path)
+
+        if not audio_clips:
+            await processing_msg.edit("❌ No audio found in any videos!")
+            del user_videos[user_id]
+            shutil.rmtree(temp_dir)
+            return
+
+        await processing_msg.edit("🔗 Concatenating audio files...")
+
+        # Concatenate all audio clips
+        final_audio = concatenate_audioclips(audio_clips)
+        output_path = os.path.join(temp_dir, "combined_audio.mp3")
+        final_audio.write_audiofile(output_path, logger=None)
+
+        # Close all clips
+        for clip in audio_clips:
+            clip.close()
+        final_audio.close()
+
+        await processing_msg.edit("📤 Uploading combined audio...")
+
+        # Send the combined audio
+        await client.send_file(
+            event.chat_id,
+            output_path,
+            attributes=[DocumentAttributeAudio(
+                duration=int(final_audio.duration),
+                title="Combined Audio",
+                performer="Video Audio Bot"
+            )],
+            caption="✅ Here's your combined audio!",
+            buttons=reply_buttons
+        )
+
+        await processing_msg.delete()
+
+        # Clear user's video queue
+        del user_videos[user_id]
+
+    except Exception as e:
+        await event.respond(f"❌ Error processing videos: {str(e)}")
+        print(f"Error: {e}")
+
+    finally:
+        # Cleanup
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-@app.on_message(filters.command("clear") & filters.private)
-async def clear_command(client: Client, message: Message):
-    """Clear all videos for the user."""
-    user_id = message.from_user.id
-
-    if user_id in user_videos:
-        # Delete files
-        deleted_count = 0
-        for video_path in user_videos[user_id]:
-            try:
-                if os.path.exists(video_path):
-                    os.remove(video_path)
-                    deleted_count += 1
-            except Exception as e:
-                logger.error(f"Error deleting file {video_path}: {e}")
-
-        # Clear from memory
-        user_videos[user_id] = []
-
-        await message.reply_text(f"🗑️ Cleared **{deleted_count}** video(s)! You can start fresh now.")
-    else:
-        await message.reply_text("📭 No videos to clear.")
-
-
-@app.on_message(filters.video & filters.private | filters.document & filters.private)
-async def handle_video(client: Client, message: Message):
-    """Handle incoming video files."""
-    user_id = message.from_user.id
+@client.on(events.NewMessage(func=lambda e: e.video or (e.document and any(
+    isinstance(attr, DocumentAttributeVideo) for attr in e.document.attributes
+))))
+async def video_handler(event):
+    """Handle incoming video messages"""
+    user_id = event.sender_id
 
     # Initialize user's video list if not exists
     if user_id not in user_videos:
         user_videos[user_id] = []
 
-    # Get video (can be sent as video or document)
-    video = message.video or message.document
+    # Add video message to user's queue
+    user_videos[user_id].append(event.message)
 
-    if not video:
-        await message.reply_text("❌ Please send a valid video file.")
-        return
+    count = len(user_videos[user_id])
 
-    # Check if document is actually a video
-    if message.document and not (message.document.mime_type and 'video' in message.document.mime_type):
-        await message.reply_text("❌ Please send a valid video file.")
-        return
+    reply_buttons = [
+        [Button.text("✅ Process Videos"), Button.text("📊 Status")],
+        [Button.text("/clear"), Button.text("/start")]
+    ]
 
-    # Get file info
-    file_size_mb = video.file_size / (1024 * 1024)
-    file_name = video.file_name or f"video_{len(user_videos[user_id])}.mp4"
-
-    status_msg = await message.reply_text(f"⬇️ Downloading **{file_name}** ({file_size_mb:.2f} MB)...")
-
-    try:
-        # Download video
-        file_path = os.path.join(TEMP_DIR, f"{user_id}_{len(user_videos[user_id])}_{file_name}")
-        await message.download(file_path)
-
-        # Store video path
-        user_videos[user_id].append(file_path)
-
-        await status_msg.edit_text(
-            f"✅ **Video received!**\n\n"
-            f"📊 Total videos: **{len(user_videos[user_id])}**\n"
-            f"💾 Size: {file_size_mb:.2f} MB\n\n"
-            f"Send more videos or use `/merge` to combine audio."
-        )
-
-    except Exception as e:
-        logger.error(f"Error downloading video: {e}")
-        await status_msg.edit_text(f"❌ Error downloading video: {str(e)}")
+    await event.respond(
+        f"✅ Video {count} received!\n\n"
+        f"📹 Total videos in queue: {count}\n"
+        f"Send more videos or tap '✅ Process Videos' to process them.",
+        buttons=reply_buttons
+    )
 
 
-@app.on_message(filters.command("merge") & filters.private)
-async def merge_audio_command(client: Client, message: Message):
-    """Merge audio from all videos."""
-    user_id = message.from_user.id
+# Handle text button presses
+@client.on(events.NewMessage(pattern='✅ Process Videos'))
+async def process_button_handler(event):
+    """Handle Process Videos button press"""
+    await done_handler(event)
 
-    if user_id not in user_videos or not user_videos[user_id]:
-        await message.reply_text("❌ No videos to merge. Send some videos first!")
-        return
 
-    if len(user_videos[user_id]) < 2:
-        await message.reply_text("❌ You need at least 2 videos to merge. Send more videos!")
-        return
+@client.on(events.NewMessage(pattern='📊 Status'))
+async def status_button_handler(event):
+    """Handle Status button press"""
+    await status_handler(event)
 
-    status_msg = await message.reply_text(f"🎵 Processing **{len(user_videos[user_id])}** videos...")
 
-    audio_clips = []
-    temp_audio_files = []
+# Callback query handler for inline buttons (keeping old functionality)
+@client.on(events.CallbackQuery)
+async def callback_handler(event):
+    """Handle button clicks"""
+    user_id = event.sender_id
+    data = event.data.decode('utf-8')
 
-    try:
-        # Extract audio from each video
-        for i, video_path in enumerate(user_videos[user_id], 1):
-            await status_msg.edit_text(
-                f"🎬 Extracting audio from video **{i}/{len(user_videos[user_id])}**...\n"
-                f"📁 {os.path.basename(video_path)}"
+    if data == "status":
+        if user_id in user_videos and user_videos[user_id]:
+            count = len(user_videos[user_id])
+            buttons = [
+                [Button.inline("✅ Process Videos", b"done")],
+                [Button.inline("❌ Clear Queue", b"cancel")]
+            ]
+            await event.edit(
+                f"📊 Queue Status\n\n"
+                f"📹 Videos in queue: {count}\n"
+                f"Ready to process!",
+                buttons=buttons
             )
+        else:
+            buttons = [[Button.inline("🔙 Back to Start", b"start")]]
+            await event.edit("📭 No videos in queue\n\nSend me some videos!", buttons=buttons)
 
-            video_clip = VideoFileClip(video_path)
-            audio = video_clip.audio
+    elif data == "cancel":
+        if user_id in user_videos:
+            del user_videos[user_id]
+            buttons = [[Button.inline("🔙 Back to Start", b"start")]]
+            await event.edit("✅ Video queue cleared!", buttons=buttons)
+        else:
+            buttons = [[Button.inline("🔙 Back to Start", b"start")]]
+            await event.edit("❌ No videos in queue", buttons=buttons)
 
-            if audio is None:
-                await message.reply_text(f"⚠️ Video {i} has no audio track, skipping...")
-                video_clip.close()
-                continue
-
-            # Save audio temporarily
-            temp_audio_path = os.path.join(TEMP_DIR, f"{user_id}_audio_{i}.mp3")
-            audio.write_audiofile(temp_audio_path, logger=None, verbose=False)
-            temp_audio_files.append(temp_audio_path)
-
-            audio_clips.append(AudioFileClip(temp_audio_path))
-            video_clip.close()
-
-        if not audio_clips:
-            await status_msg.edit_text("❌ No audio found in any of the videos!")
+    elif data == "done":
+        if user_id not in user_videos or not user_videos[user_id]:
+            buttons = [[Button.inline("🔙 Back to Start", b"start")]]
+            await event.edit("❌ No videos to process. Please send videos first!", buttons=buttons)
             return
 
-        # Concatenate audio
-        await status_msg.edit_text(f"🔗 Merging **{len(audio_clips)}** audio tracks...")
-        final_audio = concatenate_audioclips(audio_clips)
+        await event.edit("⏳ Processing your videos... This may take a while.")
 
-        # Save final audio
-        output_path = os.path.join(OUTPUT_DIR, f"{user_id}_merged_audio.mp3")
-        final_audio.write_audiofile(output_path, logger=None, verbose=False)
+        temp_dir = tempfile.mkdtemp()
+        audio_clips = []
 
-        # Get file size
-        output_size_mb = os.path.getsize(output_path) / (1024 * 1024)
+        try:
+            # Download and extract audio from each video
+            for idx, video_message in enumerate(user_videos[user_id]):
+                await event.edit(
+                    f"📥 Downloading video {idx + 1}/{len(user_videos[user_id])}..."
+                )
 
-        # Close clips
-        for clip in audio_clips:
-            clip.close()
-        final_audio.close()
+                video_path = os.path.join(temp_dir, f"video_{idx}.mp4")
+                audio_path = os.path.join(temp_dir, f"audio_{idx}.mp3")
 
-        # Send audio file
-        await status_msg.edit_text(f"📤 Sending merged audio ({output_size_mb:.2f} MB)...")
+                # Download video using Telethon client
+                await client.download_media(video_message, video_path)
 
-        await message.reply_audio(
-            audio=output_path,
-            title="Merged Audio",
-            caption=f"✅ **Audio merged successfully!**\n\n"
-                    f"🎵 Combined {len(audio_clips)} audio tracks\n"
-                    f"💾 Size: {output_size_mb:.2f} MB\n\n"
-                    f"Use `/clear` to remove videos or send more to merge again."
+                await event.edit(
+                    f"🎵 Extracting audio {idx + 1}/{len(user_videos[user_id])}..."
+                )
+
+                # Extract audio
+                video_clip = VideoFileClip(video_path)
+                if video_clip.audio is not None:
+                    video_clip.audio.write_audiofile(audio_path, logger=None)
+                    audio_clips.append(AudioFileClip(audio_path))
+                    video_clip.close()
+                else:
+                    await client.send_message(
+                        event.chat_id,
+                        f"⚠️ Video {idx + 1} has no audio track, skipping..."
+                    )
+                    video_clip.close()
+                    os.remove(video_path)
+                    continue
+
+                # Clean up video file
+                os.remove(video_path)
+
+            if not audio_clips:
+                buttons = [[Button.inline("🔙 Back to Start", b"start")]]
+                await event.edit("❌ No audio found in any videos!", buttons=buttons)
+                del user_videos[user_id]
+                shutil.rmtree(temp_dir)
+                return
+
+            await event.edit("🔗 Concatenating audio files...")
+
+            # Concatenate all audio clips
+            final_audio = concatenate_audioclips(audio_clips)
+            output_path = os.path.join(temp_dir, "combined_audio.mp3")
+            final_audio.write_audiofile(output_path, logger=None)
+
+            # Close all clips
+            for clip in audio_clips:
+                clip.close()
+            final_audio.close()
+
+            await event.edit("📤 Uploading combined audio...")
+
+            # Send the combined audio
+            buttons = [[Button.inline("🔄 Process More Videos", b"start")]]
+            await client.send_file(
+                event.chat_id,
+                output_path,
+                attributes=[DocumentAttributeAudio(
+                    duration=int(final_audio.duration),
+                    title="Combined Audio",
+                    performer="Video Audio Bot"
+                )],
+                caption="✅ Here's your combined audio!",
+                buttons=buttons
+            )
+
+            await event.delete()
+
+            # Clear user's video queue
+            del user_videos[user_id]
+
+        except Exception as e:
+            buttons = [[Button.inline("🔙 Back to Start", b"start")]]
+            await event.edit(f"❌ Error processing videos: {str(e)}", buttons=buttons)
+            print(f"Error: {e}")
+
+        finally:
+            # Cleanup
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    elif data == "start":
+        buttons = [
+            [Button.inline("📊 Check Status", b"status")],
+            [Button.inline("✅ Process Videos", b"done"), Button.inline("❌ Clear Queue", b"cancel")]
+        ]
+
+        await event.edit(
+            "👋 Welcome to Video Audio Concatenator Bot!\n\n"
+            "📹 Send me multiple videos (up to 2GB each)\n"
+            "🎵 I'll extract and combine their audio\n"
+            "🔊 Then send you the merged audio file\n\n"
+            "Use the buttons below to control the bot:",
+            buttons=buttons
         )
 
-        await status_msg.delete()
 
-        # Cleanup temp audio files
-        for temp_file in temp_audio_files:
-            try:
-                os.remove(temp_file)
-            except:
-                pass
-
-        # Cleanup output file
-        try:
-            os.remove(output_path)
-        except:
-            pass
-
-    except Exception as e:
-        logger.error(f"Error merging audio: {e}")
-        await status_msg.edit_text(f"❌ **Error merging audio:**\n`{str(e)}`")
-
-        # Cleanup on error
-        for clip in audio_clips:
-            clip.close()
-
-
-        # Cleanup temp files on error
-        for temp_file in temp_audio_files:
-            os.remove(temp_file)
-
-
-
-def main():
-    """Start the bot."""
-    logger.info("Starting Video Audio Merger Bot with Pyrogram...")
-    logger.info("First run will require phone verification code from Telegram")
-
-    # Run the bot
-    app.run()
+async def main():
+    """Start the bot"""
+    print("🤖 Starting bot...")
+    # Start client with bot token
+    await client.start(bot_token=settings.BOT_TOKEN)
+    print("✅ Bot is running!")
+    print("Press Ctrl+C to stop")
+    await client.run_until_disconnected()
 
 
 if __name__ == '__main__':
-    main()
+    # Install required packages first:
+    # pip install telethon moviepy
+    asyncio.run(main())
