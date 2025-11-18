@@ -3,7 +3,7 @@ import asyncio
 import tempfile
 import shutil
 
-
+import uvicorn
 from telethon import TelegramClient, events, Button
 from telethon.tl.types import DocumentAttributeVideo, DocumentAttributeAudio
 from moviepy.editor import VideoFileClip, concatenate_audioclips, AudioFileClip
@@ -354,18 +354,16 @@ async def callback_handler(event):
             buttons=buttons
         )
 
+from fastapi import FastAPI
+app=FastAPI()
 
-async def main():
-    """Start the bot"""
-    print("🤖 Starting bot...")
-    # Start client with bot token
+@app.on_event("startup")
+async def start_bot():
+    # Start pyrogram in background on the same event loop
     await client.start(bot_token=settings.BOT_TOKEN)
-    print("✅ Bot is running!")
-    print("Press Ctrl+C to stop")
-    await client.run_until_disconnected()
 
 
-if __name__ == '__main__':
-    # Install required packages first:
-    # pip install telethon moviepy
-    asyncio.run(main())
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
