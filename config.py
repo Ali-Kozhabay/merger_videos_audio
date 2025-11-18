@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     API_HASH: str
     PHONE_NUMBER: str
     BOT_NAME: str
+    BOT_TOKEN: str
 
     class Config:
         env_file = ".env"
