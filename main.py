@@ -360,10 +360,11 @@ app=FastAPI()
 @app.on_event("startup")
 async def start_bot():
     # Start pyrogram in background on the same event loop
-    await client.start(bot_token=settings.BOT_TOKEN)
+    asyncio.create_task(client.start(bot_token=settings.BOT_TOKEN))
 
 
 
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+
