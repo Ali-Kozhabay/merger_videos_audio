@@ -362,6 +362,10 @@ async def start_bot():
     # Start pyrogram in background on the same event loop
     asyncio.create_task(client.start(bot_token=settings.BOT_TOKEN))
 
+@app.get("/")
+async def healthcheck():
+    return {"status": "ok"}
+
 
 
 
