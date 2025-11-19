@@ -357,10 +357,16 @@ async def callback_handler(event):
 from fastapi import FastAPI
 app=FastAPI()
 
+async def run_bot():
+    try:
+        await client.start(bot_token=settings.BOT_TOKEN)
+        print("BOT STARTED SUCCESSFULLY")
+    except Exception as e:
+        print("BOT CRASHED:", e)
+
 @app.on_event("startup")
-async def start_bot():
-    # Start pyrogram in background on the same event loop
-    asyncio.create_task(client.start(bot_token=settings.BOT_TOKEN))
+async def startup_event():
+    asyncio.create_task(run_bot())
 
 @app.get("/")
 async def healthcheck():
