@@ -358,15 +358,31 @@ from fastapi import FastAPI
 app=FastAPI()
 
 async def run_bot():
+    print("STARTING TELETHON BOT...")
     try:
+        # запускаем бота
         await client.start(bot_token=settings.BOT_TOKEN)
-        print("BOT STARTED SUCCESSFULLY")
+        print("TELETHON BOT STARTED ✓")
+
+        # держим его живым, пока соединение не разорвётся
+        await client.run_until_disconnected()
+        print("TELETHON BOT DISCONNECTED")
     except Exception as e:
-        print("BOT CRASHED:", e)
+        print("TELETHON BOT FAILED:", repr(e))
+
 
 @app.on_event("startup")
-async def startup_event():
+async def on_startup():
+    # запускаем Telethon в фоне, чтобы FastAPI не блокировался
     asyncio.create_task(run_bot())
+    print("FASTAPI STARTUP DONE")
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    print("STOPPING TELETHON BOT...")
+    await client.disconnect()
+    print("TELETHON BOT STOPPED")
 
 @app.get("/")
 async def healthcheck():
