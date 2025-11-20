@@ -2,7 +2,7 @@ import os
 import asyncio
 import tempfile
 import shutil
-
+import logging
 import uvicorn
 from telethon import TelegramClient, events, Button
 from telethon.tl.types import DocumentAttributeVideo, DocumentAttributeAudio
@@ -11,7 +11,7 @@ from moviepy.editor import VideoFileClip, concatenate_audioclips, AudioFileClip
 from config import settings
 
 
-
+logger = logging.getLogger(__name__)
 # Initialize the client
 client = TelegramClient('bot_session', settings.API_ID, settings.API_HASH)
 
@@ -32,7 +32,7 @@ async def start_handler(event):
         [Button.text("✅ Process Videos"), Button.text("📊 Status")],
         [Button.text("/clear"), Button.text("/start")]
     ]
-
+    logger.info(f"{event.sender.first_name} started server")
     await event.respond(
         "👋 Welcome to Video Audio Concatenator Bot!\n\n"
         "📹 Send me multiple videos (up to 2GB each)\n"
@@ -49,6 +49,7 @@ async def clear_handler(event):
     if user_id in user_videos:
         del user_videos[user_id]
         await event.respond("✅ Video queue cleared!")
+        logger.info(f"{event.sender.first_name} cleared video queue")
     else:
         await event.respond("❌ No videos in queue")
 
@@ -65,6 +66,7 @@ async def status_handler(event):
 
     if user_id in user_videos and user_videos[user_id]:
         count = len(user_videos[user_id])
+        logger.info(f"{event.sender.first_name}  checked status ")
         await event.respond(
             f"📊 You have {count} video(s) in queue.\n"
             f"Tap '✅ Process Videos' to process them.",
@@ -141,6 +143,7 @@ async def done_handler(event):
         final_audio.close()
 
         await processing_msg.edit("📤 Uploading combined audio...")
+        logger.info(f"{event.sender.first_name}  got extracted audio ")
 
         # Send the combined audio
         await client.send_file(
