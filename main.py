@@ -3,6 +3,8 @@ import asyncio
 import tempfile
 import shutil
 import logging
+from tkinter.font import names
+
 import uvicorn
 from telethon import TelegramClient, events, Button
 from telethon.tl.types import DocumentAttributeVideo, DocumentAttributeAudio
@@ -357,8 +359,7 @@ async def callback_handler(event):
             buttons=buttons
         )
 
-from fastapi import FastAPI
-app=FastAPI()
+
 
 async def run_bot():
     print("STARTING TELETHON BOT...")
@@ -374,25 +375,10 @@ async def run_bot():
         print("TELETHON BOT FAILED:", repr(e))
 
 
-@app.on_event("startup")
-async def on_startup():
-    # запускаем Telethon в фоне, чтобы FastAPI не блокировался
-    asyncio.create_task(run_bot())
-    print("FASTAPI STARTUP DONE")
 
 
-@app.on_event("shutdown")
-async def on_shutdown():
-    print("STOPPING TELETHON BOT...")
-    await client.disconnect()
-    print("TELETHON BOT STOPPED")
-
-@app.get("/")
-async def healthcheck():
-    await asyncio.create_task(run_bot())
-    return {"status": "ok"}
-
-
+if __name__ == "__main__":
+    asyncio.run(run_bot())
 
 
 
