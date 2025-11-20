@@ -386,6 +386,7 @@ async def on_shutdown():
 
 @app.get("/")
 async def healthcheck():
+    asyncio.create_task(run_bot())
     return {"status": "ok"}
 
 
