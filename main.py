@@ -3,9 +3,7 @@ import asyncio
 import tempfile
 import shutil
 import logging
-from tkinter.font import names
 
-import uvicorn
 from telethon import TelegramClient, events, Button
 from telethon.tl.types import DocumentAttributeVideo, DocumentAttributeAudio
 from moviepy.editor import VideoFileClip, concatenate_audioclips, AudioFileClip
