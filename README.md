@@ -1,47 +1,48 @@
 # Video Audio Merger Bot
 
-A small Pyrogram-based Telegram userbot that downloads every video you forward to it, extracts each audio track with MoviePy, merges the clips, and sends you a single MP3 file back.
+Telegram bot (Telethon) that queues your videos, extracts and concatenates their audio tracks, then lets you transcribe and translate the merged audio to English, Russian, and Kazakh with OpenAI.
 
 ## Features
-- Accepts Telegram videos or video documents (up to the usual 2 GB limit).
-- Tracks a per-user queue so you can keep adding clips before merging.
-- `/status`, `/merge`, `/clear`, `/help`, and `/start` commands for basic control.
-- Cleans up downloaded videos and temporary audio files automatically.
+- Accepts Telegram videos/documents (up to 2 GB each) and keeps a per-user queue.
+- Extracts audio with MoviePy and returns a single merged MP3.
+- `/status`, `/done` (via “✅ Process Videos” button), `/clear`, `/translate`, `/start` commands.
+- `/translate` transcribes the last merged audio with Whisper and sends PDFs containing the original transcript plus English/Russian/Kazakh translations (via free Google Translate).
+- Cleans up temporary files automatically.
 
 ## Requirements
-- Python 3.13+
-- [Poetry](https://python-poetry.org/) or another way to install dependencies from `pyproject.toml`
-- A Telegram account to run the userbot.
+- Python 3.10+
+- [Poetry](https://python-poetry.org/) or another way to install from `pyproject.toml`
+- Telegram bot token + OpenAI API key for Whisper/ChatGPT.
 
 ## Setup
-1. Copy `config.py`'s expected variables into a `.env` file (same folder) in this format:
+1. Create a `.env` next to `config.py`:
    ```env
    API_ID=123456
    API_HASH=0123456789abcdef0123456789abcdef
-   PHONE_NUMBER=+123456789
    BOT_NAME=video_audio_merger_bot
+   BOT_TOKEN=123456:abcdef...
+   API_KEY=sk-...
    ```
 2. Install dependencies:
    ```bash
    poetry install
    ```
-3. Create the working folders once (the app also does this automatically): `temp_videos/` for downloads and `output_audio/` for merged files.
+3. Ensure the folders exist (the app also auto-creates them): `temp_videos/` for downloads and `output_audio/` for stored merged audio.
 
 ## Running the bot
 ```bash
 poetry run python main.py
 ```
-The first start triggers Pyrogram’s login flow—enter the Telegram verification code in the terminal, and the `video_audio_merger_bot.session` file will be created for future runs.
+The bot uses the supplied `BOT_TOKEN` to start; no interactive login is required.
 
 ## Usage flow
-1. Send the bot private video messages (or upload video documents).
-2. Use `/status` to list what’s in your queue.
-3. When you have at least two videos, send `/merge`; the bot extracts and concatenates only the audio tracks and replies with an MP3 file.
-4. Use `/clear` anytime to delete queued files from disk and start fresh.
+1. Send the bot one or more videos.
+2. Tap “📊 Status” or `/status` to see your queue.
+3. Tap “✅ Process Videos” or `/done` to merge and receive the combined MP3.
+4. Tap `/translate` to transcribe that merged audio and receive a PDF with English/Russian/Kazakh translations.
+5. Use `/clear` anytime to reset your queue.
 
 ## Project structure
-- `main.py` – bot logic, handlers, and MoviePy processing.
+- `main.py` – handlers, MoviePy processing, and translation/PDF generation.
 - `config.py` – Pydantic settings loader for environment variables.
-- `temp_videos/`, `output_audio/`, `data/`, `video_audio_merger_bot.session` – runtime artifacts that the bot reads/writes.
-
-Feel free to extend the bot with validation, background jobs, or a bot-token flow, but the current setup is ready for personal use once credentials are supplied.
+- `temp_videos/`, `output_audio/`, `data/`, `bot_session.session` – runtime artifacts.
