@@ -7,17 +7,10 @@ from datetime import datetime
 from xml.sax.saxutils import escape
 
 
-from openai import  OpenAI
+from openai import OpenAI
 from deep_translator import GoogleTranslator
 from telethon import TelegramClient, events, Button
 from telethon.tl.types import DocumentAttributeVideo, DocumentAttributeAudio
-from moviepy.editor import VideoFileClip, concatenate_audioclips, AudioFileClip
-from reportlab.lib.pagesizes import letter
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
 
 from config import settings
 
@@ -29,6 +22,65 @@ client = TelegramClient('bot_session', settings.API_ID, settings.API_HASH)
 # Store user video collections
 user_videos = {}
 user_audios = {}
+
+# Whisper API accepts files up to 25MB; keep headroom for safety.
+WHISPER_SAFE_FILESIZE_BYTES = 22 * 1024 * 1024
+WHISPER_TARGET_SAMPLE_RATE = 16_000
+WHISPER_TARGET_BITRATE = "64k"
+
+
+async def compress_audio_for_whisper(source_path: str) -> str:
+    """
+    Downsample and downmix audio to keep size within Whisper limits.
+
+    Returns the path to the compressed file (caller is responsible for cleanup).
+    """
+    def _compress() -> str:
+        from moviepy.audio.io.AudioFileClip import AudioFileClip
+
+        fd, temp_path = tempfile.mkstemp(suffix=".mp3")
+        os.close(fd)
+        clip = AudioFileClip(source_path)
+        clip.write_audiofile(
+            temp_path,
+            fps=WHISPER_TARGET_SAMPLE_RATE,
+            codec="libmp3lame",
+            bitrate=WHISPER_TARGET_BITRATE,
+            ffmpeg_params=["-ac", "1"],
+            logger=None
+        )
+        clip.close()
+        return temp_path
+
+    return await asyncio.to_thread(_compress)
+
+
+async def transcribe_audio(cli: OpenAI, audio_path: str) -> str:
+    """Run Whisper transcription in a worker thread to avoid blocking the event loop."""
+    def _transcribe() -> str:
+        with open(audio_path, "rb") as audio:
+            result = cli.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio,
+                response_format="text"
+            )
+        if isinstance(result, str):
+            return result
+        return getattr(result, "text", str(result))
+
+    return await asyncio.to_thread(_transcribe)
+
+
+async def translate_languages(text: str, languages: dict[str, str]) -> dict[str, str]:
+    """Translate text into multiple languages using Google Translate."""
+    def _translate() -> dict[str, str]:
+        translations: dict[str, str] = {}
+        for lang_name, lang_code in languages.items():
+            translator = GoogleTranslator(source="auto", target=lang_code)
+            translations[lang_name] = translator.translate(text)
+        return translations
+
+    return await asyncio.to_thread(_translate)
 
 
 @client.on(events.NewMessage(pattern='/start'))
@@ -99,6 +151,13 @@ def create_pdf(transcript, translations, pdf_path):
         translations: Dictionary of language name -> translated text (can be single entry)
         pdf_path: Output PDF file path
     """
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import inch
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
     # Use a Unicode-capable font so Cyrillic/Kazakh render correctly
     font_name = "ArialUnicode"
     font_path = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"
@@ -199,50 +258,60 @@ async def translate_handler(event):
 
     cli = OpenAI(api_key=settings.API_KEY)
     pdf_paths = []
+    cleanup_paths = []
     translation_succeeded = False
     try:
-        with open(audio_path, "rb") as audio:
-            transcript = cli.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio,
-                response_format="text"
+        transcript_input_path = audio_path
+        if os.path.getsize(audio_path) > WHISPER_SAFE_FILESIZE_BYTES:
+            await processing_msg.edit("🎚️ Compressing audio for transcription...")
+            transcript_input_path = await compress_audio_for_whisper(audio_path)
+            cleanup_paths.append(transcript_input_path)
+
+        if os.path.getsize(transcript_input_path) > WHISPER_SAFE_FILESIZE_BYTES:
+            await processing_msg.edit("❌ Audio too large for /translate.")
+            await event.reply(
+                "❌ Combined audio is too large for transcription. "
+                "Please send shorter clips or split the video batch.",
+                buttons=reply_buttons
             )
+            return
 
-            # Target languages for translation
-            languages = {
-                "Russian": "ru",
-                "English": "en",
-                "Kazakh": "kk"
-            }
+        transcript = await transcribe_audio(cli, transcript_input_path)
 
-            # Update status
-            await processing_msg.edit("🌐 Translating (Google)...")
+        # Target languages for translation
+        languages = {
+            "Russian": "ru",
+            "English": "en",
+            "Kazakh": "kk"
+        }
 
-            # Store translations
-            translations = {}
-            # Translate to each language
-            try:
-                for lang_name, lang_code in languages.items():
-                    translator = GoogleTranslator(source="auto", target=lang_code)
-                    translations[lang_name] = translator.translate(transcript)
-            except Exception as translate_err:
-                await processing_msg.edit("❌ Translation failed.")
-                await event.reply(f"❌ Translation failed: {translate_err}", buttons=reply_buttons)
-                return
+        # Update status
+        await processing_msg.edit("🌐 Translating (Google)...")
 
-            # Update status
-            await processing_msg.edit("📄 Generating PDFs...")
+        try:
+            translations = await translate_languages(transcript, languages)
+        except Exception as translate_err:
+            await processing_msg.edit("❌ Translation failed.")
+            await event.reply(f"❌ Translation failed: {translate_err}", buttons=reply_buttons)
+            return
 
-            pdf_paths = []
-            # Create and send one PDF per language
-            for lang_name, lang_code in languages.items():
-                per_lang_pdf = f"transcript_{event.message.id}_{lang_code}.pdf"
-                create_pdf(transcript, {lang_name: translations[lang_name]}, per_lang_pdf)
-                pdf_paths.append(per_lang_pdf)
-                await event.reply(file=per_lang_pdf,
-                                  message=f"✅ Transcript + {lang_name} translation")
+        # Update status
+        await processing_msg.edit("📄 Generating PDFs...")
 
-            translation_succeeded = True
+        # Create and send one PDF per language
+        for lang_name, lang_code in languages.items():
+            per_lang_pdf = f"transcript_{event.message.id}_{lang_code}.pdf"
+            await asyncio.to_thread(
+                create_pdf,
+                transcript,
+                {lang_name: translations[lang_name]},
+                per_lang_pdf
+            )
+            pdf_paths.append(per_lang_pdf)
+            await event.reply(file=per_lang_pdf,
+                              message=f"✅ Transcript + {lang_name} translation")
+
+        translation_succeeded = True
     except Exception as e:
         await event.reply(f"❌ {str(e)}", buttons=reply_buttons)
         # Delete processing message
@@ -250,6 +319,12 @@ async def translate_handler(event):
         await processing_msg.delete()
         # Clean up generated PDFs
         for path in pdf_paths:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        for path in cleanup_paths:
             if os.path.exists(path):
                 try:
                     os.remove(path)
@@ -269,6 +344,8 @@ async def translate_handler(event):
 async def done_handler(event):
     """Process all videos and create combined audio"""
     user_id = event.sender_id
+
+    from moviepy.editor import VideoFileClip, concatenate_audioclips, AudioFileClip
 
     reply_buttons = [
         [Button.text("✅ Process Videos"), Button.text("📊 Status")],
