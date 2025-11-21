@@ -3,6 +3,7 @@ import asyncio
 import tempfile
 import shutil
 import logging
+import urllib.request
 from datetime import datetime
 from xml.sax.saxutils import escape
 
@@ -27,6 +28,35 @@ user_audios = {}
 WHISPER_SAFE_FILESIZE_BYTES = 22 * 1024 * 1024
 WHISPER_TARGET_SAMPLE_RATE = 16_000
 WHISPER_TARGET_BITRATE = "64k"
+FONT_CANDIDATES = [
+    ("data/fonts/DejaVuSans.ttf", "DejaVuSans"),
+    ("data/fonts/NotoSans-Regular.ttf", "NotoSans"),
+    ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "DejaVuSans"),
+    ("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "NotoSans"),
+    ("/usr/share/fonts/noto/NotoSans-Regular.ttf", "NotoSans"),
+    ("/System/Library/Fonts/Supplemental/Arial Unicode.ttf", "ArialUnicode"),
+]
+FONT_DOWNLOAD_URLS = [
+    ("data/fonts/DejaVuSans.ttf",
+     "https://github.com/dejavu-fonts/dejavu-fonts/raw/master/ttf/DejaVuSans.ttf"),
+    ("data/fonts/NotoSans-Regular.ttf",
+     "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSans/NotoSans-Regular.ttf"),
+]
+
+
+def ensure_unicode_fonts():
+    """Ensure at least one Unicode font is available locally for PDF rendering."""
+    os.makedirs("data/fonts", exist_ok=True)
+    for target_path, url in FONT_DOWNLOAD_URLS:
+        if os.path.exists(target_path):
+            continue
+        try:
+            with urllib.request.urlopen(url, timeout=8) as response:
+                with open(target_path, "wb") as f:
+                    f.write(response.read())
+            logger.info("Downloaded font to %s", target_path)
+        except Exception as exc:
+            logger.warning("Could not download font from %s: %s", url, exc)
 
 
 async def compress_audio_for_whisper(source_path: str) -> str:
@@ -158,16 +188,23 @@ def create_pdf(transcript, translations, pdf_path):
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
 
-    # Use a Unicode-capable font so Cyrillic/Kazakh render correctly
-    font_name = "ArialUnicode"
-    font_path = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"
-    if os.path.exists(font_path):
+    # Try to pick a Unicode-capable font so Cyrillic/Kazakh render correctly
+    font_name = "Helvetica"
+    ensure_unicode_fonts()
+    for font_path, candidate_name in FONT_CANDIDATES:
+        if not os.path.exists(font_path):
+            continue
         try:
-            pdfmetrics.getFont(font_name)
+            pdfmetrics.getFont(candidate_name)
         except KeyError:
-            pdfmetrics.registerFont(TTFont(font_name, font_path))
+            try:
+                pdfmetrics.registerFont(TTFont(candidate_name, font_path))
+            except Exception:
+                continue
+        font_name = candidate_name
+        break
     else:
-        font_name = "Helvetica"  # fallback, may not render Cyrillic ideally
+        logger.warning("Falling back to Helvetica; Cyrillic/Kazakh may render poorly")
 
     doc = SimpleDocTemplate(pdf_path, pagesize=letter,
                             topMargin=0.75 * inch, bottomMargin=0.75 * inch)
@@ -310,6 +347,12 @@ async def translate_handler(event):
             pdf_paths.append(per_lang_pdf)
             await event.reply(file=per_lang_pdf,
                               message=f"✅ Transcript + {lang_name} translation")
+
+        # Also send translations as plain text to avoid font issues on some servers
+        translations_text = "🌐 Translations\n\n" + "\n\n".join(
+            f"{lang}:\n{translations[lang]}" for lang in languages.keys()
+        )
+        await event.reply(buttons=reply_buttons)
 
         translation_succeeded = True
     except Exception as e:
