@@ -43,6 +43,10 @@ The bot uses the supplied `BOT_TOKEN` to start; no interactive login is required
 5. Use `/clear` anytime to reset your queue.
 
 ## Project structure
-- `main.py` – handlers, MoviePy processing, and translation/PDF generation.
+- `main.py` – thin entrypoint that wires the bot.
+- `app/bot.py` – Telethon client creation plus all handlers.
+- `app/audio_utils.py` – Whisper-safe compression, transcription, and translations.
+- `app/pdf_utils.py` & `app/fonts.py` – PDF generation with Unicode font handling.
+- `app/state.py` – in-memory per-user queues.
 - `config.py` – Pydantic settings loader for environment variables.
 - `temp_videos/`, `output_audio/`, `data/`, `bot_session.session` – runtime artifacts.
