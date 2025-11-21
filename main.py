@@ -299,19 +299,19 @@ async def translate_handler(event):
     translation_succeeded = False
     try:
         transcript_input_path = audio_path
-        if os.path.getsize(audio_path) > WHISPER_SAFE_FILESIZE_BYTES:
-            await processing_msg.edit("🎚️ Compressing audio for transcription...")
-            transcript_input_path = await compress_audio_for_whisper(audio_path)
-            cleanup_paths.append(transcript_input_path)
-
-        if os.path.getsize(transcript_input_path) > WHISPER_SAFE_FILESIZE_BYTES:
-            await processing_msg.edit("❌ Audio too large for /translate.")
-            await event.reply(
-                "❌ Combined audio is too large for transcription. "
-                "Please send shorter clips or split the video batch.",
-                buttons=reply_buttons
-            )
-            return
+        # if os.path.getsize(audio_path) > WHISPER_SAFE_FILESIZE_BYTES:
+        #     await processing_msg.edit("🎚️ Compressing audio for transcription...")
+        #     transcript_input_path = await compress_audio_for_whisper(audio_path)
+        #     cleanup_paths.append(transcript_input_path)
+        #
+        # if os.path.getsize(transcript_input_path) > WHISPER_SAFE_FILESIZE_BYTES:
+        #     await processing_msg.edit("❌ Audio too large for /translate.")
+        #     await event.reply(
+        #         "❌ Combined audio is too large for transcription. "
+        #         "Please send shorter clips or split the video batch.",
+        #         buttons=reply_buttons
+        #     )
+        #     return
 
         transcript = await transcribe_audio(cli, transcript_input_path)
 
@@ -352,7 +352,6 @@ async def translate_handler(event):
         translations_text = "🌐 Translations\n\n" + "\n\n".join(
             f"{lang}:\n{translations[lang]}" for lang in languages.keys()
         )
-        await event.reply(buttons=reply_buttons)
 
         translation_succeeded = True
     except Exception as e:
