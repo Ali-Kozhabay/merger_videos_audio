@@ -12,7 +12,13 @@ from app.audio_utils import (
     is_too_large_for_whisper,
 )
 from app.pdf_utils import create_pdf
-from app.state import user_videos, user_audios, clear_user_data
+from app.state import (
+    user_videos,
+    user_audios,
+    clear_user_data,
+    clear_user_videos,
+    clear_user_audio,
+)
 from config import settings
 from openai import OpenAI
 import os
@@ -89,19 +95,6 @@ def register_handlers(client: TelegramClient) -> None:
 
         try:
             transcript_input_path = audio_path
-            if is_too_large_for_whisper(audio_path):
-                await processing_msg.edit("🎚️ Compressing audio for transcription...")
-                transcript_input_path = await compress_audio_for_whisper(audio_path)
-                cleanup_paths.append(transcript_input_path)
-
-            if is_too_large_for_whisper(transcript_input_path):
-                await processing_msg.edit("❌ Audio too large for /translate.")
-                await event.reply(
-                    "❌ Combined audio is too large for transcription. "
-                    "Please send shorter clips or split the video batch.",
-                    buttons=reply_buttons
-                )
-                return
 
             transcript = await transcribe_audio(cli, transcript_input_path)
 
@@ -127,11 +120,6 @@ def register_handlers(client: TelegramClient) -> None:
                 await event.reply(file=per_lang_pdf,
                                   message=f"✅ Transcript + {lang_name} translation")
 
-            translations_text = "🌐 Translations\n\n" + "\n\n".join(
-                f"{lang}:\n{translations[lang]}" for lang in languages.keys()
-            )
-            await event.reply(translations_text, buttons=reply_buttons)
-            translation_succeeded = True
         except Exception as exc:  # noqa: BLE001
             await event.reply(f"❌ {exc}", buttons=reply_buttons)
         finally:
@@ -143,7 +131,7 @@ def register_handlers(client: TelegramClient) -> None:
                     except OSError:
                         pass
             if translation_succeeded:
-                user_audios.pop(user_id, None)
+                clear_user_audio(user_id)
                 if os.path.exists(audio_path):
                     try:
                         os.remove(audio_path)
@@ -229,7 +217,7 @@ def register_handlers(client: TelegramClient) -> None:
                 buttons=reply_buttons
             )
             await processing_msg.delete()
-            clear_user_data(user_id)
+            clear_user_videos(user_id)  # keep audio for /translate
         except Exception as exc:  # noqa: BLE001
             await event.respond(f"❌ Error processing videos: {exc}")
         finally:
