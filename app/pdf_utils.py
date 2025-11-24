@@ -9,6 +9,8 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from app.fonts import pick_font_name
 
 
+
+
 def create_pdf(transcript: str, translations: dict[str, str], pdf_path: str) -> None:
     """Create a PDF with the transcript and translations."""
     font_name = pick_font_name()
@@ -67,5 +69,64 @@ def create_pdf(transcript: str, translations: dict[str, str], pdf_path: str) -> 
         clean_translation = escape(translated_text).replace("\n", "<br/>")
         elements.append(Paragraph(clean_translation, body_style))
         elements.append(Spacer(1, 0.15 * inch))
+
+    doc.build(elements)
+
+def create_pdf_for_paraphrasing(transcribe: str, paraphrase: str, pdf_path: str) -> None:
+    """Create a PDF with the transcript and paraphrase."""
+
+    font_name = pick_font_name()
+
+    doc = SimpleDocTemplate(pdf_path, pagesize=letter,
+                            topMargin=0.75 * inch, bottomMargin=0.75 * inch)
+
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=18,
+        textColor='#2c3e50',
+        spaceAfter=20,
+        alignment=1,
+        fontName=font_name
+    )
+    heading_style = ParagraphStyle(
+        'CustomHeading',
+        parent=styles['Heading2'],
+        fontSize=14,
+        textColor='#34495e',
+        spaceAfter=10,
+        spaceBefore=15,
+        fontName=font_name
+    )
+    body_style = ParagraphStyle(
+        'CustomBody',
+        parent=styles['BodyText'],
+        fontSize=11,
+        leading=16,
+        spaceAfter=10,
+        fontName=font_name
+    )
+    elements = []
+    title = Paragraph("Audio Transcription & Paraphrasing", title_style)
+    elements.append(title)
+
+    timestamp = Paragraph(f"<i>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</i>",
+                          styles['Normal'])
+    elements.append(timestamp)
+    elements.append(Spacer(1, 0.3 * inch))
+
+    elements.append(Paragraph("📝 Original Transcript", heading_style))
+    clean_transcript = escape(transcribe).replace("\n", "<br/>")
+    elements.append(Paragraph(clean_transcript, body_style))
+    elements.append(Spacer(1, 0.2 * inch))
+
+    elements.append(Paragraph("🌐 Paraphrasing", heading_style))
+    elements.append(Spacer(1, 0.1 * inch))
+
+    clean_paraphrase = escape(paraphrase).replace("\n", "<br/>")
+    elements.append(Paragraph(clean_paraphrase, body_style))
+    elements.append(Spacer(1, 0.15 * inch))
 
     doc.build(elements)
