@@ -119,6 +119,11 @@ def register_handlers(client: TelegramClient) -> None:
                 pdf_paths.append(per_lang_pdf)
                 await event.reply(file=per_lang_pdf,
                                   message=f"✅ Transcript + {lang_name} translation")
+                if os.path.exists(audio_path):
+                    try:
+                        os.remove(audio_path)
+                    except OSError:
+                        raise OSError(f"Failed to remove {audio_path}")
 
         except Exception as exc:  # noqa: BLE001
             await event.reply(f"❌ {exc}", buttons=reply_buttons)
@@ -130,13 +135,7 @@ def register_handlers(client: TelegramClient) -> None:
                         os.remove(path)
                     except OSError:
                         pass
-            if translation_succeeded:
-                clear_user_audio(user_id)
-                if os.path.exists(audio_path):
-                    try:
-                        os.remove(audio_path)
-                    except OSError:
-                        pass
+
 
     @client.on(events.NewMessage(pattern='/done'))
     async def done_handler(event):
