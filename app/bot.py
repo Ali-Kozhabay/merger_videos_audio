@@ -1,30 +1,31 @@
 import asyncio
 import logging
+import os
+import shutil
+import tempfile
+from datetime import datetime
 from typing import List
 
 from telethon import TelegramClient, events, Button
 from telethon.tl.types import DocumentAttributeVideo, DocumentAttributeAudio
 
 from app.audio_utils import (
-    compress_audio_for_whisper,
     transcribe_audio,
     translate_languages,
-    is_too_large_for_whisper,
+    paraphrasing_transcribe_text,
 )
-from app.pdf_utils import create_pdf
+from app.pdf_utils import create_pdf,create_pdf_for_paraphrasing
 from app.state import (
     user_videos,
     user_audios,
+    user_transcripts,
     clear_user_data,
     clear_user_videos,
     clear_user_audio,
 )
 from config import settings
 from openai import OpenAI
-import os
-import shutil
-import tempfile
-from datetime import datetime
+
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ def reply_keyboard() -> List[List[Button]]:
     return [
         [Button.text("✅ Process Videos"), Button.text("📊 Status")],
         [Button.text("/clear"), Button.text("/start")],
-        [Button.text("/translate")],
+        [Button.text("/translate"),Button.text("/paraphrase")],
     ]
 
 
@@ -91,12 +92,12 @@ def register_handlers(client: TelegramClient) -> None:
         cli = OpenAI(api_key=settings.API_KEY)
         pdf_paths = []
         cleanup_paths = []
-        translation_succeeded = False
 
         try:
             transcript_input_path = audio_path
 
             transcript = await transcribe_audio(cli, transcript_input_path)
+            user_transcripts[user_id] = transcript
 
             languages = {
                 "Russian": "ru",
@@ -240,6 +241,49 @@ def register_handlers(client: TelegramClient) -> None:
                 [Button.text("/clear"), Button.text("/start")]
             ]
         )
+
+    @client.on(events.NewMessage(pattern="/paraphrase"))
+    async def paraphrase_handler(event):
+        user_id = event.sender_id
+        reply_buttons = reply_keyboard()
+        transcript = user_transcripts.get(user_id)
+
+        if not transcript:
+            await event.respond(
+                "❌ No transcripts found. Tap '/translate' after processing audio first.",
+                buttons=reply_buttons
+            )
+            return
+
+        processing_msg = await event.reply("📝 Paraphrasing transcript...")
+        cli = OpenAI(api_key=settings.API_KEY)
+        pdf_path = f"paraphrased_{event.message.id}.pdf"
+
+        try:
+            paraphrased_text = await paraphrasing_transcribe_text(cli, transcript)
+            if not paraphrased_text:
+                raise ValueError("Empty paraphrase received")
+            await processing_msg.edit("📄 Generating PDFs...")
+            await asyncio.to_thread(
+                create_pdf_for_paraphrasing,
+                transcript,
+                paraphrased_text,
+                pdf_path
+            )
+            await event.reply(
+                file=pdf_path,
+                message="✅ Paraphrased!"
+            )
+        except Exception as exc:  # noqa: BLE001
+            await processing_msg.edit(f"❌ {exc}", buttons=reply_buttons)
+        finally:
+            if os.path.exists(pdf_path):
+                try:
+                    os.remove(pdf_path)
+                except OSError:
+                    pass
+
+
 
     @client.on(events.NewMessage(pattern='✅ Process Videos'))
     async def process_button_handler(event):
