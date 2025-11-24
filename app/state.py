@@ -2,6 +2,7 @@ from typing import Dict, List
 
 user_videos: Dict[int, List] = {}
 user_audios: Dict[int, str] = {}
+user_transcripts: Dict[int, str] = {}
 
 
 def clear_user_data(user_id: int) -> None:
