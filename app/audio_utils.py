@@ -67,7 +67,7 @@ def is_too_large_for_whisper(path: str) -> bool:
     return os.path.exists(path) and os.path.getsize(path) > WHISPER_SAFE_FILESIZE_BYTES
 
 async def paraphrasing_transcribe_text(cli: OpenAI, text: str) -> str:
-    """Paraphrase text using Whisper."""
+    """Paraphrase text using OpenAI."""
     def _paraphrase() -> str:
         response = cli.chat.completions.create(
             model="gpt-4.1-mini",
@@ -79,7 +79,6 @@ async def paraphrasing_transcribe_text(cli: OpenAI, text: str) -> str:
                 {"role": "user", "content": text},
             ],
         )
-        # OpenAI SDK returns a ChatCompletionMessage object; use .content safely
         message = response.choices[0].message
         content = getattr(message, "content", None)
         if not content and isinstance(message, dict):
