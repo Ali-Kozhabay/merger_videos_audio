@@ -274,6 +274,7 @@ def register_handlers(client: TelegramClient) -> None:
                 file=pdf_path,
                 message="✅ Paraphrased!"
             )
+            user_transcripts.pop(user_id, None)
         except Exception as exc:  # noqa: BLE001
             await processing_msg.edit(f"❌ {exc}", buttons=reply_buttons)
         finally:
