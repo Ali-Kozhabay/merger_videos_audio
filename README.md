@@ -8,6 +8,7 @@ Telegram bot (Telethon) that queues your videos, extracts and concatenates their
 - `/status`, `/done` (via “✅ Process Videos” button), `/clear`, `/translate`, `/start` commands.
 - `/translate` transcribes the last merged audio with Whisper and sends PDFs containing the original transcript plus English/Russian/Kazakh translations (via free Google Translate).
 - Cleans up temporary files automatically.
+- `/keywords` auto-builds a stitched 5–10 minute MP4 by generating images (free service) from keywords extracted from your latest paraphrased transcript and stitching them with MoviePy; falls back to a local LLM+MoviePy slide generator if image generation fails.
 
 ## Requirements
 - Python 3.10+
@@ -41,6 +42,7 @@ The bot uses the supplied `BOT_TOKEN` to start; no interactive login is required
 3. Tap “✅ Process Videos” or `/done` to merge and receive the combined MP3.
 4. Tap `/translate` to transcribe that merged audio and receive a PDF with English/Russian/Kazakh translations.
 5. Use `/clear` anytime to reset your queue.
+6. Run `/paraphrase` after `/translate`, then `/keywords` to get a 5–10 minute montage (images per keyword stitched into video; falls back to slides if image gen fails).
 
 ## Project structure
 - `main.py` – thin entrypoint that wires the bot.

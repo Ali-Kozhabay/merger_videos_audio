@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import shutil
 import tempfile
 from datetime import datetime
@@ -14,14 +15,26 @@ from app.audio_utils import (
     translate_languages,
     paraphrasing_transcribe_text,
 )
+from app.video_utils import (
+    build_video_from_images,
+    build_subtitle_entries,
+    generate_images_for_keywords,
+    generate_keyword_video,
+    mux_video_audio_and_subtitles,
+    synthesize_speech_from_text,
+    text_to_scenes,
+    VIDEO_SIZE,
+)
 from app.pdf_utils import create_pdf,create_pdf_for_paraphrasing
 from app.state import (
     user_videos,
     user_audios,
     user_transcripts,
+    user_paraphrases,
     clear_user_data,
     clear_user_videos,
     clear_user_audio,
+    clear_user_paraphrase,
 )
 from config import settings
 from openai import OpenAI
@@ -35,6 +48,7 @@ def reply_keyboard() -> List[List[Button]]:
         [Button.text("✅ Process Videos"), Button.text("📊 Status")],
         [Button.text("/clear"), Button.text("/start")],
         [Button.text("/translate"),Button.text("/paraphrase")],
+        [Button.text("/create_video_from_text")],
     ]
 
 
@@ -46,6 +60,7 @@ def register_handlers(client: TelegramClient) -> None:
             "📹 Send me multiple videos (up to 2GB each)\n"
             "🎵 I'll extract and combine their audio\n"
             "🔊 Then send you the merged audio file\n\n"
+            "🪄 `/create_video_from_text` builds video from your paraphrased transcript (images per keyword stitched together).\n"
             "Use the buttons below to control the bot:",
             buttons=reply_keyboard()
         )
@@ -274,6 +289,8 @@ def register_handlers(client: TelegramClient) -> None:
                 file=pdf_path,
                 message="✅ Paraphrased!"
             )
+            clear_user_paraphrase(user_id)
+            user_paraphrases[user_id] = paraphrased_text
             user_transcripts.pop(user_id, None)
         except Exception as exc:  # noqa: BLE001
             await processing_msg.edit(f"❌ {exc}", buttons=reply_buttons)
@@ -293,6 +310,95 @@ def register_handlers(client: TelegramClient) -> None:
     @client.on(events.NewMessage(pattern='📊 Status'))
     async def status_button_handler(event):
         await status_handler(event)
+
+    @client.on(events.NewMessage(pattern=r"(?is)^/create_video_from_text"))
+    async def keywords_video_handler(event):
+        """
+        Create a video montage from the last paraphrased transcript:
+        generate an image per text slice (no keywords) and stitch them together. Falls back to slides if image gen fails.
+        """
+        user_id = event.sender_id
+        paraphrased_text = user_paraphrases.get(user_id)
+        if not paraphrased_text:
+            await event.respond(
+                "❌ No paraphrased text found. Run `/translate` then `/paraphrase` first.",
+                buttons=reply_keyboard()
+            )
+            return
+
+        status_msg = await event.respond("🔍 Slicing your paraphrased text into scenes...")
+        temp_dir = tempfile.mkdtemp(prefix="keywords_video_")
+        max_scenes = 30
+
+        try:
+            cli = OpenAI(api_key=settings.API_KEY)
+            scenes = text_to_scenes(paraphrased_text, max_scenes=max_scenes)
+            if not scenes:
+                raise ValueError("Couldn't derive scenes from paraphrased text.")
+
+            await status_msg.edit("🎙️ Creating narration and subtitles...")
+            speech_path, audio_duration = await synthesize_speech_from_text(
+                cli,
+                paraphrased_text,
+                temp_dir,
+            )
+            target_duration = max(audio_duration * 1.3, audio_duration + 20.0)
+            subtitles = build_subtitle_entries(paraphrased_text, target_duration)
+
+            video_w, video_h = VIDEO_SIZE
+            try:
+                await status_msg.edit("🖼️ Generating images for your scenes ...")
+                image_paths = await generate_images_for_keywords(
+                    scenes,
+                    temp_dir,
+                    cli=cli,
+                )
+
+                await status_msg.edit("🎞️ Building video from generated images...")
+                result_path, total_duration, video_w, video_h = await build_video_from_images(
+                    image_paths,
+                    temp_dir,
+                    target_duration=target_duration,
+                )
+            except Exception as image_exc:  # noqa: BLE001
+                logger.exception("Image-based video failed, falling back: %s", image_exc)
+                await status_msg.edit("⚠️ Image generation failed, falling back to storyboard slides...")
+                result_path, total_duration = await generate_keyword_video(
+                    cli,
+                    scenes,
+                    temp_dir,
+                    target_duration=target_duration,
+                )
+
+            await status_msg.edit("🔊 Merging narration and subtitles...")
+            final_path, final_duration, video_w, video_h = await mux_video_audio_and_subtitles(
+                result_path,
+                speech_path,
+                subtitles,
+                temp_dir,
+            )
+
+            await status_msg.edit("📤 Uploading your stitched mini-video...")
+            await client.send_file(
+                event.chat_id,
+                final_path,
+                caption=f"✅ Combined {len(scenes)} scenes into one clip.",
+                attributes=[
+                    DocumentAttributeVideo(
+                        duration=int(final_duration),
+                        w=video_w,
+                        h=video_h,
+                        supports_streaming=True,
+                    )
+                ],
+                mime_type="video/mp4",
+                force_document=False,
+            )
+            clear_user_paraphrase(user_id)
+        except Exception as exc:  # noqa: BLE001
+            await status_msg.edit(f"❌ Couldn't create video: {exc}")
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def create_client() -> TelegramClient:
