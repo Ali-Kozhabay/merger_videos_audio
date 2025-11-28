@@ -107,6 +107,8 @@ def register_handlers(client: TelegramClient) -> None:
                 target_duration,
                 target_wpm=desired_wpm,
                 max_chars=3600,
+                pause_every=60,
+                pause_seconds=3,
             )
 
         speech_path, stretched_duration = await stretch_audio_to_duration(
@@ -115,7 +117,7 @@ def register_handlers(client: TelegramClient) -> None:
             temp_dir,
         )
         audio_duration = stretched_duration
-        subtitles = build_subtitle_entries(user_text, target_duration, lead_time=0.15)
+        subtitles = build_subtitle_entries(user_text, audio_duration, lead_time=0.15)
 
         scenes = text_to_scenes(user_text, max_scenes=40)
         if not scenes:
@@ -134,7 +136,7 @@ def register_handlers(client: TelegramClient) -> None:
             result_path, total_duration, video_w, video_h = await build_video_from_images(
                 image_paths,
                 temp_dir,
-                target_duration=target_duration,
+                target_duration=max(audio_duration, target_duration),
             )
         except Exception as image_exc:  # noqa: BLE001
             logger.exception("Image-based video failed: %s", image_exc)
@@ -143,7 +145,7 @@ def register_handlers(client: TelegramClient) -> None:
                 cli,
                 scenes,
                 temp_dir,
-                target_duration=target_duration,
+                target_duration=max(audio_duration, target_duration),
             )
 
         await status_msg.edit("🔊 Merging narration and subtitles...")
@@ -508,7 +510,7 @@ def register_handlers(client: TelegramClient) -> None:
             )
             # Keep visuals close to narration length to avoid a long silent tail.
             target_duration = audio_duration + 1.5
-            subtitles = build_subtitle_entries(paraphrased_text, target_duration, lead_time=0.35)
+            subtitles = build_subtitle_entries(paraphrased_text, audio_duration, lead_time=0.15)
 
             video_w, video_h = VIDEO_SIZE
             try:
@@ -523,7 +525,7 @@ def register_handlers(client: TelegramClient) -> None:
                 result_path, total_duration, video_w, video_h = await build_video_from_images(
                     image_paths,
                     temp_dir,
-                    target_duration=target_duration,
+                    target_duration=audio_duration,
                 )
             except Exception as image_exc:  # noqa: BLE001
                 logger.exception("Image-based video failed, falling back: %s", image_exc)
@@ -532,7 +534,7 @@ def register_handlers(client: TelegramClient) -> None:
                     cli,
                     scenes,
                     temp_dir,
-                    target_duration=target_duration,
+                    target_duration=audio_duration,
                 )
 
             await status_msg.edit("🔊 Merging narration and subtitles...")
@@ -541,7 +543,7 @@ def register_handlers(client: TelegramClient) -> None:
                 speech_path,
                 subtitles,
                 temp_dir,
-                target_duration=target_duration,
+                target_duration=audio_duration,
             )
 
             await status_msg.edit("📤 Uploading your stitched mini-video...")

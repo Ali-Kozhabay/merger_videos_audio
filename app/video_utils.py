@@ -575,10 +575,11 @@ async def stretch_audio_to_duration(
     source_path: str,
     target_duration: float,
     temp_dir: str,
+    min_factor: float = 0.85,
     max_factor: float = 1.8,
 ) -> Tuple[str, float]:
     """
-    Time-stretch the audio so it matches target_duration.
+    Time-stretch the audio so it matches target_duration (mild slowdowns/speedups).
 
     Returns the path to the stretched audio and its duration.
     """
@@ -591,12 +592,11 @@ async def stretch_audio_to_duration(
         if current <= 0:
             raise ValueError("Audio duration is zero; cannot stretch.")
 
-        # Only speed up (never slow down) to avoid unnatural audio; pad with silence later if shorter.
-        if current <= target_duration * 1.02:
-            return source_path, current
-
         factor = current / target_duration
-        factor = min(max(factor, 1.0), max_factor)
+        if 0.98 <= factor <= 1.02:
+            return source_path, current  # close enough
+
+        factor = min(max(factor, min_factor), max_factor)
         stretched = audio_clip.fx(vfx.speedx, factor=factor)
         stretched_path = os.path.join(temp_dir, "keywords_narration_stretched.mp3")
         stretched.write_audiofile(
