@@ -72,6 +72,25 @@ def create_pdf(transcript: str, translations: dict[str, str], pdf_path: str) -> 
 
     doc.build(elements)
 
+
+def extract_text_from_pdf(pdf_path: str) -> str:
+    """Extract text from a PDF. Requires PyPDF2."""
+    try:
+        import PyPDF2
+    except ImportError as exc:  # noqa: F841
+        raise ImportError("PyPDF2 is required to read PDF text. Please install it.") from exc
+
+    reader = PyPDF2.PdfReader(pdf_path)
+    parts: list[str] = []
+    for page in reader.pages:
+        try:
+            text = page.extract_text() or ""
+        except Exception:  # noqa: BLE001
+            text = ""
+        if text.strip():
+            parts.append(text.strip())
+    return "\n".join(parts).strip()
+
 def create_pdf_for_paraphrasing(transcribe: str, paraphrase: str, pdf_path: str) -> None:
     """Create a PDF with the transcript and paraphrase."""
 

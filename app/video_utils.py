@@ -310,6 +310,7 @@ async def generate_images_for_keywords(
     os.makedirs(temp_dir, exist_ok=True)
     paths: List[str] = []
     base_url = "https://image.pollinations.ai/prompt/"
+    openai_allowed = cli is not None
 
     def _download_image(idx: int, prompt: str) -> str:
         url = f"{base_url}{requests.utils.quote(prompt)}?width={size.split('x')[0]}&height={size.split('x')[1]}"
@@ -348,16 +349,16 @@ async def generate_images_for_keywords(
             path = await asyncio.to_thread(_download_image, idx, full_prompt)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Pollinations image failed for idx %s: %s", idx, exc)
-            if cli is not None:
+            if cli is not None and openai_allowed:
                 try:
                     path = await asyncio.to_thread(_generate_image_with_openai, idx, full_prompt)
                 except Exception as openai_exc:  # noqa: BLE001
                     logger.warning("OpenAI image failed for idx %s: %s", idx, openai_exc)
+                    if "403" in str(openai_exc) or "Forbidden" in str(openai_exc):
+                        openai_allowed = False
         if path:
             paths.append(path)
 
-    if not paths:
-        raise RuntimeError("No images could be generated for the provided scenes.")
     return paths
 
 
@@ -378,7 +379,7 @@ def text_to_scenes(text: str, max_scenes: int = 30) -> List[str]:
     return parts[:max_scenes]
 
 
-def build_subtitle_entries(text: str, total_duration: float) -> List[SubtitleEntry]:
+def build_subtitle_entries(text: str, total_duration: float, lead_time: float = 0.0) -> List[SubtitleEntry]:
     """Create timed subtitle entries spread across the provided duration."""
     if total_duration <= 0:
         return []
@@ -403,10 +404,10 @@ def build_subtitle_entries(text: str, total_duration: float) -> List[SubtitleEnt
             span = remaining_duration
         else:
             span = min(span, remaining_duration)
-        start = cursor
+        start = max(cursor - max(lead_time, 0.0), 0.0)
         end = start + span
         entries.append(((start, end), sentence))
-        cursor = end
+        cursor = end + max(lead_time, 0.0)
         remaining_duration -= span
         remaining_words -= word_count
 
@@ -473,19 +474,24 @@ async def synthesize_speech_from_text(
     text: str,
     temp_dir: str,
     voice: str = "alloy",
-) -> Tuple[str, float]:
-    """Generate an mp3 narration from the provided text via OpenAI TTS."""
+    max_chars: int = 3800,
+    ) -> Tuple[str, float]:
+    """Generate mp3 narration from the provided text via OpenAI TTS."""
     if not text.strip():
         raise ValueError("Text is empty; cannot synthesize speech.")
+
+    trimmed_text = text.strip().replace("[PAUSE]", "<break time='3s'/>")
+    if len(trimmed_text) > max_chars:
+        trimmed_text = trimmed_text[: max_chars - 20] + "..."
 
     os.makedirs(temp_dir, exist_ok=True)
     audio_path = os.path.join(temp_dir, "keywords_narration.mp3")
 
     def _synthesize() -> Tuple[str, float]:
         response = cli.audio.speech.create(
-            model="tts-1",
+            model="tts-1-hd",
             voice=voice,
-            input=text,
+            input=trimmed_text,
             response_format="mp3",
         )
 
@@ -509,6 +515,107 @@ async def synthesize_speech_from_text(
     return await asyncio.to_thread(_synthesize)
 
 
+async def ensure_text_for_duration(
+    cli: OpenAI,
+    text: str,
+    target_duration: float,
+    target_wpm: int = 150,
+    max_chars: int = 3600,
+    pause_every: float | None = None,
+    pause_seconds: float = 3.0,
+) -> str:
+    """
+    If the text is too short for the target duration, expand/paraphrase it to fill the time.
+    """
+    if target_duration <= 0:
+        return text
+
+    words = text.split()
+    needed_words = int(target_duration / 60.0 * target_wpm)
+    if len(words) >= int(needed_words * 0.9):
+        return text
+
+    pause_note = ""
+    if pause_every and pause_every > 0 and pause_seconds > 0:
+        pause_note = (
+            f"\nInsert a short natural pause marker like '[PAUSE]' every ~{int(pause_every)} seconds "
+            f"of narration (about every {int(pause_every/60*target_wpm)} words). "
+            "Keep prose flowing; no bullet lists."
+        )
+
+    prompt = (
+        "You are expanding a script for narration. Keep the meaning and tone, but elaborate with helpful detail "
+        f"so the length is about {needed_words} words. Keep it coherent prose, no lists."
+        f"{pause_note}"
+        f"\n\nOriginal text:\n{text}"
+    )
+
+    def _expand() -> str:
+        response = cli.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": "Return only the expanded script text."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        message = response.choices[0].message
+        content = getattr(message, "content", None)
+        if not content and isinstance(message, dict):
+            content = message.get("content", "")
+        return (content or "").strip()
+
+    expanded = await asyncio.to_thread(_expand)
+    final_text = expanded or text
+    if len(final_text) > max_chars:
+        final_text = final_text[: max_chars - 20] + "..."
+    return final_text
+
+
+async def stretch_audio_to_duration(
+    source_path: str,
+    target_duration: float,
+    temp_dir: str,
+    max_factor: float = 1.8,
+) -> Tuple[str, float]:
+    """
+    Time-stretch the audio so it matches target_duration.
+
+    Returns the path to the stretched audio and its duration.
+    """
+    if target_duration <= 0:
+        raise ValueError("target_duration must be positive for time-stretching.")
+
+    audio_clip = AudioFileClip(source_path)
+    try:
+        current = audio_clip.duration or 0.0
+        if current <= 0:
+            raise ValueError("Audio duration is zero; cannot stretch.")
+
+        # Only speed up (never slow down) to avoid unnatural audio; pad with silence later if shorter.
+        if current <= target_duration * 1.02:
+            return source_path, current
+
+        factor = current / target_duration
+        factor = min(max(factor, 1.0), max_factor)
+        stretched = audio_clip.fx(vfx.speedx, factor=factor)
+        stretched_path = os.path.join(temp_dir, "keywords_narration_stretched.mp3")
+        stretched.write_audiofile(
+            stretched_path,
+            codec="libmp3lame",
+            bitrate="128k",
+            fps=44_100,
+            logger=None,
+        )
+        stretched.close()
+
+        stretched_clip = AudioFileClip(stretched_path)
+        duration = stretched_clip.duration
+        stretched_clip.close()
+        return stretched_path, duration
+    finally:
+        audio_clip.close()
+
+
 def _render_subtitle_clip(entry: SubtitleEntry, video_size: Tuple[int, int]) -> ImageClip | None:
     """Turn a subtitle entry into an overlay clip."""
     (start, end), text = entry
@@ -517,10 +624,10 @@ def _render_subtitle_clip(entry: SubtitleEntry, video_size: Tuple[int, int]) -> 
         return None
 
     width, height = video_size
-    overlay_height = int(height * 0.22)
+    overlay_height = int(height * 0.18)
     img = Image.new("RGBA", (width, overlay_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img, "RGBA")
-    padding = 32
+    padding = 24
     draw.rectangle(
         (
             padding,
@@ -531,8 +638,12 @@ def _render_subtitle_clip(entry: SubtitleEntry, video_size: Tuple[int, int]) -> 
         fill=(0, 0, 0, 170),
     )
 
-    font = _pick_font(42)
+    font = _pick_font(32)
     lines = _wrap_text(draw, text, font, width - padding * 2)
+    if len(lines) > 2:
+        lines = lines[:2]
+        lines[-1] = lines[-1].rstrip(".!,;:") + "..."
+
     y = overlay_height / 2 - (len(lines) * font.size * 1.3) / 2
     for line in lines:
         line_width = draw.textlength(line, font=font)
@@ -572,6 +683,7 @@ async def mux_video_audio_and_subtitles(
     audio_path: str,
     subtitles: Sequence[SubtitleEntry],
     temp_dir: str,
+    target_duration: float | None = None,
 ) -> Tuple[str, float, int, int]:
     """
     Combine the base video with narration audio and burned-in subtitles.
@@ -582,26 +694,33 @@ async def mux_video_audio_and_subtitles(
         video_clip = VideoFileClip(video_path)
         audio_clip = AudioFileClip(audio_path)
 
-        target_duration = max(video_clip.duration or 0.0, audio_clip.duration or 0.0)
-        if target_duration <= 0:
+        target = target_duration if target_duration and target_duration > 0 else max(
+            video_clip.duration or 0.0,
+            audio_clip.duration or 0.0,
+        )
+        if target <= 0:
             raise ValueError("Video or audio duration is zero.")
 
-        if video_clip.duration < target_duration:
+        if video_clip.duration < target:
             freeze = video_clip.to_ImageClip(t=max(video_clip.duration - 0.05, 0.0)).set_duration(
-                target_duration - video_clip.duration
+                target - video_clip.duration
             )
             freeze = freeze.set_start(video_clip.duration)
             extended = concatenate_videoclips([video_clip, freeze], method="compose")
             video_clip = extended
+        elif video_clip.duration > target:
+            video_clip = video_clip.subclip(0, target)
         else:
-            video_clip = video_clip.set_duration(target_duration)
+            video_clip = video_clip.set_duration(target)
 
         audio_for_video = audio_clip
         silence = None
-        if audio_clip.duration < target_duration - 0.1:
-            silence_duration = target_duration - audio_clip.duration
+        if audio_clip.duration < target - 0.1:
+            silence_duration = target - audio_clip.duration
             silence = AudioClip(lambda t: 0.0, duration=silence_duration, fps=getattr(audio_clip, "fps", 44_100))
             audio_for_video = concatenate_audioclips([audio_clip, silence])
+        elif audio_clip.duration > target:
+            audio_for_video = audio_clip.subclip(0, target)
 
         video_with_audio = video_clip.set_audio(audio_for_video)
         subtitle_clips = _subtitle_clips_from_entries(subtitles, video_with_audio.size)
