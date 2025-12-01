@@ -49,7 +49,7 @@ def reply_keyboard() -> List[List[Button]]:
         [Button.text("✅ Process Videos"), Button.text("📊 Status")],
         [Button.text("/clear"), Button.text("/start")],
         [Button.text("/translate"), Button.text("/paraphrase")],
-        [Button.text("/keywords"), Button.text("/video_from_text")],
+        [Button.text("/video_from_paraphrase"), Button.text("/video_from_text")],
     ]
 
 
@@ -181,7 +181,7 @@ def register_handlers(client: TelegramClient) -> None:
             "📹 Send me multiple videos (up to 2GB each)\n"
             "🎵 I'll extract and combine their audio\n"
             "🔊 Then send you the merged audio file\n\n"
-            "🪄 `/keywords` builds a stitched video from your paraphrased transcript (images per scene + subtitles).\n"
+            "🪄 `/video_from_paraphrase` builds a stitched video from your paraphrased transcript (images per scene + subtitles).\n"
             "🆕 `/video_from_text` makes a ~4 minute narrated video from any text you provide (inline) or from a PDF you send after the command.\n"
             "Use the buttons below to control the bot:",
             buttons=reply_keyboard()
