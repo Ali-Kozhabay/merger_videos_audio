@@ -394,26 +394,27 @@ def build_subtitle_entries(text: str, total_duration: float, lead_time: float = 
     cursor = 0.0
     remaining_duration = total_duration
     remaining_words = total_words
+    lead = max(lead_time, 0.0)
+    total_sentences = len(sentences)
 
     for idx, (sentence, word_count) in enumerate(zip(sentences, word_counts)):
-        if remaining_duration <= 0:
-            break
-        proportion = word_count / remaining_words if remaining_words else 1.0 / max(len(sentences) - idx, 1)
-        span = max(remaining_duration * proportion, 0.75)
-        if idx == len(sentences) - 1:
-            span = remaining_duration
-        else:
-            span = min(span, remaining_duration)
-        start = max(cursor - max(lead_time, 0.0), 0.0)
+        remaining_sentences = total_sentences - idx
+        proportion = word_count / remaining_words if remaining_words else 1.0 / remaining_sentences
+        min_span = min(0.75, remaining_duration / remaining_sentences)
+        proposed_span = remaining_duration * proportion
+        max_span = remaining_duration - (remaining_sentences - 1) * min_span
+        span = max(min_span, min(proposed_span, max_span))
+
+        start = max(cursor - lead, 0.0)
         end = start + span
         entries.append(((start, end), sentence))
-        cursor = end + max(lead_time, 0.0)
-        remaining_duration -= span
-        remaining_words -= word_count
+        cursor = end + lead
+        remaining_duration = max(remaining_duration - span, 0.0)
+        remaining_words = max(remaining_words - word_count, 0)
 
     if entries:
-        last_start, _ = entries[-1][0]
-        entries[-1] = ((last_start, total_duration), entries[-1][1])
+        last_start, last_end = entries[-1][0]
+        entries[-1] = ((last_start, max(total_duration, last_end)), entries[-1][1])
     return entries
 
 
@@ -624,10 +625,26 @@ def _render_subtitle_clip(entry: SubtitleEntry, video_size: Tuple[int, int]) -> 
         return None
 
     width, height = video_size
-    overlay_height = int(height * 0.18)
+    padding = 24
+
+    font = _pick_font(32)
+    max_width = width - padding * 2
+    lines = _wrap_text(ImageDraw.Draw(Image.new("RGB", (width, 100))), text, font, max_width)
+
+    max_lines = 3
+    # If text is too long, shrink font a bit to fit more words before trimming.
+    while len(lines) > max_lines and font.size > 22:
+        font = _pick_font(max(font.size - 4, 18))
+        lines = _wrap_text(ImageDraw.Draw(Image.new("RGB", (width, 100))), text, font, max_width)
+
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines[-1] = lines[-1].rstrip(".!,;:") + "..."
+
+    line_block_height = len(lines) * font.size * 1.3
+    overlay_height = max(int(height * 0.18), int(line_block_height + padding * 2))
     img = Image.new("RGBA", (width, overlay_height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img, "RGBA")
-    padding = 24
     draw.rectangle(
         (
             padding,
@@ -638,13 +655,7 @@ def _render_subtitle_clip(entry: SubtitleEntry, video_size: Tuple[int, int]) -> 
         fill=(0, 0, 0, 170),
     )
 
-    font = _pick_font(32)
-    lines = _wrap_text(draw, text, font, width - padding * 2)
-    if len(lines) > 2:
-        lines = lines[:2]
-        lines[-1] = lines[-1].rstrip(".!,;:") + "..."
-
-    y = overlay_height / 2 - (len(lines) * font.size * 1.3) / 2
+    y = overlay_height / 2 - line_block_height / 2
     for line in lines:
         line_width = draw.textlength(line, font=font)
         draw.text(
