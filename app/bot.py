@@ -21,11 +21,11 @@ from app.video_utils import (
     generate_images_for_keywords,
     generate_keyword_video,
     mux_video_audio_and_subtitles,
-    stretch_audio_to_duration,
     synthesize_speech_from_text,
     text_to_scenes,
     VIDEO_SIZE,
 )
+from app import runway
 from app.pdf_utils import create_pdf, create_pdf_for_paraphrasing, extract_text_from_pdf
 from app.state import (
     user_videos,
@@ -73,106 +73,194 @@ def register_handlers(client: TelegramClient) -> None:
         user_text: str,
         status_msg,
         temp_dir: str,
-        target_duration: float = 240.0,
     ) -> None:
+        if not settings.RUNWAY_API_KEY:
+            await status_msg.edit("❌ Runway is not configured. Set RUNWAY_API_KEY and try again.")
+            return
+
+        parts = 3
+        scenes_per_part = 3
+        total_scene_count = parts * scenes_per_part  # 9 scenes total
+        per_scene_seconds = 10  # fixed to hit ~100s before looping
+        image_clip_seconds = 3  # gen4 bumper after every 3 scenes
+        loop_count = 3  # repeat ~100s reel -> ~300s
+        model = getattr(settings, "RUNWAY_MODEL", "veo3.1_fast") or "veo3.1_fast"
+        image_model = getattr(settings, "RUNWAY_IMAGE_MODEL", "gen4_image_turbo") or "gen4_image_turbo"
+        ratio = getattr(settings, "RUNWAY_SIZE", "1280:720") or "1280:720"
+
+        scene_prompts = text_to_scenes(user_text, max_scenes=total_scene_count) or [user_text]
+        while len(scene_prompts) < total_scene_count:
+            scene_prompts.append(scene_prompts[-1])
+        scene_prompts = scene_prompts[:total_scene_count]
+
+        video_paths: list[str] = []
+        bumper_paths: list[str] = []
+        clips = []
+        loop_clips: list = []
+        stitched_path = None
+        looped_path = None
+        stitched = None
+        looped = None
         cli = OpenAI(api_key=settings.API_KEY)
 
-        user_text = await ensure_text_for_duration(
-            cli,
-            user_text,
-            target_duration,
-            target_wpm=165,
-            pause_every=60,
-            pause_seconds=3,
-        )
+        try:
+            from moviepy.editor import VideoFileClip, concatenate_videoclips
 
-        await status_msg.edit("🎙️ Creating narration and subtitles...")
-        max_expansions = 2
-        for attempt in range(max_expansions + 1):
+            for part_idx in range(parts):
+                start = part_idx * scenes_per_part
+                block_prompts = scene_prompts[start:start + scenes_per_part]
+                for scene_idx, scene_prompt in enumerate(block_prompts, start=1):
+                    await status_msg.edit(
+                        f"🚀 Sending part {part_idx + 1}/{parts}, scene {scene_idx}/{scenes_per_part} "
+                        f"to Runway ({per_scene_seconds}s, {model})..."
+                    )
+                    video_path, _ = await runway.generate_runway_video(
+                        api_key=settings.RUNWAY_API_KEY,
+                        prompt=scene_prompt,
+                        duration=per_scene_seconds,
+                        model=model,
+                        ratio=ratio,
+                        download=True,
+                    )
+                    video_paths.append(video_path)
+                    clip = await asyncio.to_thread(VideoFileClip, video_path)
+                    clips.append(clip)
+
+                bumper_prompt = " ".join(block_prompts)
+                await status_msg.edit(
+                    f"🖼️ Generating gen4 bumper for part {part_idx + 1}/{parts} ({image_clip_seconds}s)..."
+                )
+                bumper_path, _ = await runway.generate_runway_video(
+                    api_key=settings.RUNWAY_API_KEY,
+                    prompt=f"Cinematic still for: {bumper_prompt}",
+                    duration=image_clip_seconds,
+                    model=image_model,
+                    ratio=ratio,
+                    download=True,
+                )
+                bumper_paths.append(bumper_path)
+                bumper_clip = await asyncio.to_thread(VideoFileClip, bumper_path)
+                clips.append(bumper_clip)
+
+            await status_msg.edit("🎬 Concatenating 9 scenes + 3 bumpers (~100s)...")
+            stitched = await asyncio.to_thread(
+                lambda: concatenate_videoclips(clips, method="compose")
+            )
+
+            stitched_path = os.path.join(temp_dir, "runway_stitched_base.mp4")
+            await asyncio.to_thread(
+                stitched.write_videofile,
+                stitched_path,
+                fps=24,
+                codec="libx264",
+                audio=True,
+                audio_codec="aac",
+                verbose=False,
+                logger=None,
+            )
+
+            await status_msg.edit("🔁 Looping the base reel 3× to reach ~300s...")
+            loop_clips = [await asyncio.to_thread(VideoFileClip, stitched_path) for _ in range(loop_count)]
+            looped = await asyncio.to_thread(
+                lambda: concatenate_videoclips(loop_clips, method="compose")
+            )
+
+            looped_path = os.path.join(temp_dir, "runway_looped_300s.mp4")
+            await asyncio.to_thread(
+                looped.write_videofile,
+                looped_path,
+                fps=24,
+                codec="libx264",
+                audio=True,
+                audio_codec="aac",
+                verbose=False,
+                logger=None,
+            )
+
+            final_video_duration = looped.duration or (parts * ((scenes_per_part * per_scene_seconds) + image_clip_seconds) * loop_count)
+            final_width, final_height = looped.size if getattr(looped, "size", None) else (1280, 720)
+
+            await status_msg.edit("🎙️ Generating narration and subtitles to fit ~270s...")
+            narration_script = await ensure_text_for_duration(
+                cli,
+                user_text,
+                target_duration=final_video_duration,
+                pause_every=30.0,
+                pause_seconds=3.0,
+            )
             speech_path, audio_duration = await synthesize_speech_from_text(
                 cli,
-                user_text,
+                narration_script,
                 temp_dir,
-                max_chars=3800,
             )
-            if audio_duration >= target_duration * 0.98 or attempt == max_expansions:
-                break
+            subtitles = build_subtitle_entries(narration_script, audio_duration, lead_time=0.25)
 
-            current_words = max(len(user_text.split()), 1)
-            desired_words = int(current_words * (target_duration / max(audio_duration, 0.1)) * 1.05)
-            desired_wpm = max(150, min(240, int(desired_words / (target_duration / 60.0))))
-            user_text = await ensure_text_for_duration(
-                cli,
-                user_text,
-                target_duration,
-                target_wpm=desired_wpm,
-                max_chars=3600,
-                pause_every=60,
-                pause_seconds=3,
-            )
-
-        speech_path, stretched_duration = await stretch_audio_to_duration(
-            speech_path,
-            target_duration,
-            temp_dir,
-        )
-        audio_duration = stretched_duration
-        subtitles = build_subtitle_entries(user_text, audio_duration, lead_time=0.15)
-
-        scenes = text_to_scenes(user_text, max_scenes=40)
-        if not scenes:
-            raise ValueError("Couldn't derive scenes from the provided text.")
-
-        video_w, video_h = VIDEO_SIZE
-        try:
-            await status_msg.edit("🖼️ Generating images for your scenes (free service, with OpenAI fallback)...")
-            image_paths = await generate_images_for_keywords(
-                scenes,
+            await status_msg.edit("🔊 Merging video with narration + subtitles...")
+            final_path, final_duration, width, height = await mux_video_audio_and_subtitles(
+                looped_path,
+                speech_path,
+                subtitles,
                 temp_dir,
-                cli=cli,
+                target_duration=audio_duration,
             )
 
-            await status_msg.edit("🎞️ Building video from generated images...")
-            result_path, total_duration, video_w, video_h = await build_video_from_images(
-                image_paths,
-                temp_dir,
-                target_duration=max(audio_duration, target_duration),
+            await status_msg.edit("📤 Uploading your Runway video...")
+            await client.send_file(
+                event.chat_id,
+                final_path,
+                caption=(
+                    f"✅ Runway video ready (~{int(final_duration)}s, "
+                    "9 scenes × 3 blocks, looped 3× with narration)."
+                ),
+                attributes=[
+                    DocumentAttributeVideo(
+                        duration=max(int(final_duration), 1),
+                        w=int(width or final_width or 1280),
+                        h=int(height or final_height or 720),
+                        supports_streaming=True,
+                    )
+                ],
+                mime_type="video/mp4",
+                force_document=False,
             )
-        except Exception as image_exc:  # noqa: BLE001
-            logger.exception("Image-based video failed: %s", image_exc)
-            await status_msg.edit("⚠️ Image generation failed, falling back to storyboard slides...")
-            result_path, total_duration = await generate_keyword_video(
-                cli,
-                scenes,
-                temp_dir,
-                target_duration=max(audio_duration, target_duration),
+        except Exception as runway_exc:  # noqa: BLE001
+            logger.exception("Runway video generation failed: %s", runway_exc)
+            await status_msg.edit(
+                "❌ Runway could not generate video. Try a shorter text or try again later."
             )
-
-        await status_msg.edit("🔊 Merging narration and subtitles...")
-        final_path, final_duration, video_w, video_h = await mux_video_audio_and_subtitles(
-            result_path,
-            speech_path,
-            subtitles,
-            temp_dir,
-            target_duration=target_duration,
-        )
-
-        await status_msg.edit("📤 Uploading your 4-minute video...")
-        await client.send_file(
-            event.chat_id,
-            final_path,
-            caption=f"✅ Your ~4 minute video is ready. Duration: {int(final_duration)}s.",
-            attributes=[
-                DocumentAttributeVideo(
-                    duration=int(final_duration),
-                    w=video_w,
-                    h=video_h,
-                    supports_streaming=True,
-                )
-            ],
-            mime_type="video/mp4",
-            force_document=False,
-        )
+        finally:
+            for clip in clips:
+                try:
+                    clip.close()
+                except Exception:
+                    pass
+            for clip in loop_clips:
+                try:
+                    clip.close()
+                except Exception:
+                    pass
+            for composite in (stitched, looped):
+                try:
+                    if composite:
+                        composite.close()
+                except Exception:
+                    pass
+            for path in video_paths + bumper_paths:
+                if path and os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+            if stitched_path and os.path.exists(stitched_path):
+                try:
+                    os.remove(stitched_path)
+                except OSError:
+                    pass
+            if looped_path and os.path.exists(looped_path):
+                try:
+                    os.remove(looped_path)
+                except OSError:
+                    pass
 
     @client.on(events.NewMessage(pattern='/start'))
     async def start_handler(event):
@@ -182,7 +270,7 @@ def register_handlers(client: TelegramClient) -> None:
             "🎵 I'll extract and combine their audio\n"
             "🔊 Then send you the merged audio file\n\n"
             "🪄 `/video_from_paraphrase` builds a stitched video from your paraphrased transcript (images per scene + subtitles).\n"
-            "🆕 `/video_from_text` makes a ~4 minute narrated video from any text you provide (inline) or from a PDF you send after the command.\n"
+            "🆕 `/video_from_text` sends your text/PDF to Runway and returns a mini-video (no webhooks needed).\n"
             "Use the buttons below to control the bot:",
             buttons=reply_keyboard()
         )
@@ -368,7 +456,6 @@ def register_handlers(client: TelegramClient) -> None:
             return  # allow other command handlers to process
 
         temp_dir = tempfile.mkdtemp(prefix="video_from_text_")
-        target_duration = 240.0
         cleanup_paths: list[str] = []
         try:
             pdf_text, pdf_path = await _extract_text_from_pdf_message(event.message, temp_dir)
@@ -384,13 +471,12 @@ def register_handlers(client: TelegramClient) -> None:
                 return
 
             pending_video_from_text.pop(user_id, None)
-            status_msg = await event.respond("📜 Received content. Preparing your 4-minute narrated video...")
+            status_msg = await event.respond("📜 Received content. Sending to Runway...")
             await _build_and_send_video_from_text(
                 event,
                 user_text,
                 status_msg,
                 temp_dir,
-                target_duration=target_duration,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("video_from_text_handler failed: %s", exc)
@@ -571,12 +657,11 @@ def register_handlers(client: TelegramClient) -> None:
     @client.on(events.NewMessage(pattern=r"(?is)^/video_from_text(?:\s+(.+))?"))
     async def video_from_text_handler(event):
         """
-        Create a ~4 minute narrated video from arbitrary text or a provided PDF.
+        Create a Runway mini-video from arbitrary text or a provided PDF.
         """
         user_id = event.sender_id
         inline_text = (event.pattern_match.group(1) or "").strip() if event.pattern_match else ""
         temp_dir = tempfile.mkdtemp(prefix="video_from_text_")
-        target_duration = 240.0  # 4 minutes
         cleanup_paths: list[str] = []
 
         try:
@@ -600,19 +685,18 @@ def register_handlers(client: TelegramClient) -> None:
                 pending_video_from_text[user_id] = True
                 await event.respond(
                     "📥 Send the text or PDF now (or reply to this message with a PDF). "
-                    "I'll build a ~4 minute video from it.",
+                    "I'll request a Runway mini-video from it.",
                     buttons=reply_keyboard(),
                 )
                 return
 
             pending_video_from_text.pop(user_id, None)
-            status_msg = await event.respond("📜 Received content. Preparing your 4-minute narrated video...")
+            status_msg = await event.respond("📜 Received content. Sending to Runway...")
             await _build_and_send_video_from_text(
                 event,
                 user_text,
                 status_msg,
                 temp_dir,
-                target_duration=target_duration,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("video_from_text_followup_handler failed: %s", exc)
