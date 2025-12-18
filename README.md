@@ -1,68 +1,106 @@
 # Video Audio Merger Bot
 
-Telegram bot (Telethon) that queues your videos, extracts and concatenates their audio tracks, then lets you transcribe and translate the merged audio to English, Russian, and Kazakh with OpenAI.
+Telegram bot built with Telethon (MTProto) that:
+- queues videos per user and merges their audio into a single MP3
+- optionally transcribes + translates the merged audio (OpenAI Whisper + Google Translate)
+- optionally paraphrases the transcript and generates a narrated, subtitled “story video”
+- optionally generates a longer narrated video via Runway from plain text or a PDF
+
+This repo is designed for running your own bot instance (it is not a hosted service).
 
 ## Features
-- Accepts Telegram videos/documents (up to 2 GB each) and keeps a per-user queue.
-- Extracts audio with MoviePy and returns a single merged MP3.
-- `/status`, `/done` (via “✅ Process Videos” button), `/clear`, `/translate`, `/start` commands.
-- `/translate` transcribes the last merged audio with Whisper and sends PDFs containing the original transcript plus English/Russian/Kazakh translations (via free Google Translate).
-- `/video_from_text` sends your text/PDF to Runway; it builds 3 blocks of 3 scenes (~100s), adds a 3s gen4 bumper after each block, loops the reel 3× (~300s total), and burns in narration + subtitles.
-- Cleans up temporary files automatically.
-- `/keywords` auto-builds a stitched 5–10 minute MP4 by generating images (free service) from keywords extracted from your latest paraphrased transcript and stitching them with MoviePy; falls back to a local LLM+MoviePy slide generator if image generation fails.
+- **Video → merged audio:** send multiple Telegram videos/documents and tap **✅ Process Videos** to get a combined MP3.
+- **/translate:** transcribe the merged MP3 with `whisper-1`, then generate PDFs with translations (RU/EN/KK).
+- **/paraphrase:** paraphrase the last transcript (English) and send a PDF.
+- **/video_from_paraphrase:** turn your paraphrase into a narrated, subtitled MP4
+- **/video_from_text:** send text (or a PDF) and get a ~5 minute narrated, subtitled Runway video back (no webhooks required).
 
 ## Requirements
 - Python 3.10+
-- [Poetry](https://python-poetry.org/) or another way to install from `pyproject.toml`
-- Telegram bot token + OpenAI API key for Whisper/ChatGPT.
-- Runway API key.
+- `ffmpeg` (MoviePy uses it to read/write audio/video)
+- Poetry (recommended) or any installer that supports `pyproject.toml`
+- Credentials:
+  - Telegram `API_ID` + `API_HASH` (from https://my.telegram.org)
+  - Telegram bot token `BOT_TOKEN` (from @BotFather)
+  - OpenAI API key `API_KEY` (for Whisper / GPT / TTS / optional image fallback)
+  - Runway key `RUNWAY_API_KEY` (only required for `/video_from_text`)
 
-## Setup
-1. Create a `.env` next to `config.py`:
-   ```env
-   API_ID=123456
-   API_HASH=0123456789abcdef0123456789abcdef
-   BOT_NAME=video_audio_merger_bot
-   BOT_TOKEN=123456:abcdef...
-   API_KEY=sk-...
-   RUNWAY_API_KEY=your_runway_api_key
-   RUNWAY_MODEL=veo3.1
-   RUNWAY_IMAGE_MODEL=gen4_image_turbo
-   RUNWAY_SIZE=1280:720
-   RUNWAY_SCENES=9
-   RUNWAY_SCENE_SECONDS=9
-   ```
+## Quick start
+1. Create your `.env` file:
+   - `cp .env.example .env`
+   - fill in the values (see “Configuration” below)
 2. Install dependencies:
    ```bash
    poetry install
    ```
-3. Ensure the folders exist (the app also auto-creates them): `temp_videos/` for downloads and `output_audio/` for stored merged audio.
+3. Run the bot:
+   ```bash
+   poetry run python main.py
+   ```
 
-## Runway setup (for `/video_from_text`)
-- Create a Runway account, grab your API key from Settings → Developer → API Keys, and set `RUNWAY_API_KEY`.
-- `/video_from_text` calls Runway's task API, polls until success, downloads the MP4, and sends it back—no webhook or public URL required. It now stitches 3×3 scenes (9 total) with 3s gen4 bumpers, loops the ~100s reel three times (~300s), and adds narration + subtitles. Defaults: scene length 10s (`RUNWAY_SCENE_SECONDS`), ratio `RUNWAY_SIZE`, video model `RUNWAY_MODEL` (default `veo3.1`/`veo3.1_fast`), bumper model `RUNWAY_IMAGE_MODEL` (gen4_image_turbo by default).
+## Configuration
+Environment variables are loaded from `.env` (see `config.py`).
 
-## Running the bot
-```bash
-poetry run python main.py
-```
-The bot uses the supplied `BOT_TOKEN` to start; no interactive login is required.
+Required:
+- `API_ID`: Telegram API ID (integer)
+- `API_HASH`: Telegram API hash
+- `BOT_TOKEN`: bot token from @BotFather
+- `BOT_NAME`: bot name (currently required by settings)
+- `API_KEY`: OpenAI API key
 
-## Usage flow
-1. Send the bot one or more videos.
-2. Tap “📊 Status” or `/status` to see your queue.
-3. Tap “✅ Process Videos” or `/done` to merge and receive the combined MP3.
-4. Tap `/translate` to transcribe that merged audio and receive a PDF with English/Russian/Kazakh translations.
-5. Use `/clear` anytime to reset your queue.
-6. Run `/paraphrase` after `/translate`, then `/keywords` to get a 5–10 minute montage (images per keyword stitched into video; falls back to slides if image gen fails).
-7. Use `/video_from_text` to request a Runway video; the bot polls Runway, builds 9 scenes in three blocks with gen4 bumpers, loops the ~100s reel three times, and returns the narrated/subtitled clip.
+Optional (Runway):
+- `RUNWAY_API_KEY`: required for `/video_from_text`
+- `RUNWAY_MODEL`: defaults to `veo3.1_fast`
+- `RUNWAY_IMAGE_MODEL`: defaults to `gen4_image_turbo` (used for the short “bumper” clips)
+- `RUNWAY_SIZE`: defaults to `1280:720`
+
+## Commands (user-facing)
+- `/start`: show the keyboard and help text
+- `/status`: show how many videos are queued
+- `/clear`: clear your queued videos and any pending requests
+- `/done` or **✅ Process Videos**: merge queued videos into one MP3
+- `/translate`: transcribe + translate the last merged MP3 and send PDFs
+- `/paraphrase`: paraphrase the last transcript and send a PDF
+- `/video_from_paraphrase`: build a narrated + subtitled MP4 from your paraphrase
+- `/video_from_text [text]`: generate a Runway video from text (also supports PDFs)
+
+Note: the keyboard includes `/video_from_paraphrase`, but there is no handler implemented for it yet. Use `/keywords` instead.
+
+## Typical flows
+**Merge audio**
+1. Send 1+ videos to the bot.
+2. Tap **✅ Process Videos** (or run `/done`).
+3. You’ll receive `combined_audio.mp3`.
+
+**Translate**
+1. Run `/translate` after you’ve merged audio.
+2. The bot sends a PDF per language (RU/EN/KK).
+
+**Paraphrase → video**
+1. Run `/translate`, then `/paraphrase`.
+2. Run `/video_from_paraphrase` to get a narrated + subtitled MP4.
+
+**Runway video from text/PDF**
+1. Run `/video_from_text some text...`, or send a PDF and run `/video_from_text` in reply.
+2. If you run `/video_from_text` without content, the bot will ask you to send text/PDF next.
+
+## Data & privacy notes
+- Videos are downloaded to a temporary directory during processing and deleted afterwards.
+- The latest merged audio is also copied to `output_audio/` so it can be used for `/translate` (it is deleted after translation completes).
+- Per-user queues/transcripts/paraphrases are stored **in memory**; restarting the process clears them.
+- External services used (depending on commands): OpenAI, Google Translate, Runway, and `image.pollinations.ai`.
+
+## Docs
+- `docs/DEPLOYMENT.md` – running on a server (systemd example)
+- `docs/TROUBLESHOOTING.md` – common setup/runtime issues
 
 ## Project structure
-- `main.py` – entrypoint that runs the Telethon bot.
-- `app/bot.py` – Telethon client creation plus all handlers.
-- `app/runway.py` – Runway client with task creation, polling, and video download.
-- `app/audio_utils.py` – Whisper-safe compression, transcription, and translations.
-- `app/pdf_utils.py` & `app/fonts.py` – PDF generation with Unicode font handling.
-- `app/state.py` – in-memory per-user queues.
-- `config.py` – Pydantic settings loader for environment variables.
-- `temp_videos/`, `output_audio/`, `data/`, `bot_session.session` – runtime artifacts.
+- `main.py` – async entrypoint
+- `app/bot.py` – Telethon handlers + user flows
+- `app/service.py` – client creation + shared helpers
+- `app/runway.py` – Runway task creation, polling, and downloading
+- `app/audio_utils.py` – Whisper transcription + translations + paraphrasing
+- `app/video_utils.py` – narration, subtitles, image/slide video building
+- `app/pdf_utils.py`, `app/fonts.py` – PDF generation + Unicode font handling
+- `app/state.py` – in-memory per-user state
+- `config.py` – environment variable settings loader
